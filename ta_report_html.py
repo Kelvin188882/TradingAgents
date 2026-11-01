@@ -248,6 +248,16 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
   overflow: hidden; margin: var(--sp-3) 0 0;
   font-size: 15px; line-height: 1.75; color: var(--ink-2);
 }
+.verdict-points {
+  display: grid; gap: var(--sp-2); margin: var(--sp-4) 0 0;
+  padding-top: var(--sp-3); border-top: 1px solid var(--hairline);
+}
+.verdict-point { display: grid; grid-template-columns: 4rem minmax(0, 1fr); gap: var(--sp-3); }
+.verdict-point dt { font: 600 12px/1.8 var(--sans); color: var(--muted); }
+.verdict-point dd {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; margin: 0; font-size: 13.5px; line-height: 1.65; color: var(--ink-2);
+}
 
 /* 分析角度汇总：首屏第二级信息，不与投资评级争夺主视觉。
    整卡点击、两行摘要，去掉额外表格线，让视线只停留在角度、评级和结论上。 */
@@ -708,6 +718,81 @@ def _lead(text: str, limit: int = 120) -> str:
     return head + "…"
 
 
+def _sentences(text: str) -> list[str]:
+    """按中文句末标点拆句；小数点与英文缩写不参与拆分。"""
+    return [s.strip() for s in re.split(r"(?<=[。！？])", _plain(text)) if len(s.strip()) >= 20]
+
+
+def _best_sentence(sentences, keywords, exclude="") -> str:
+    """选包含最多指定证据词的原文句；同分取前，避免模型式自由改写。"""
+    candidates = []
+    for index, sentence in enumerate(sentences):
+        if sentence == exclude:
+            continue
+        score = sum(sentence.count(word) for word in keywords)
+        if score:
+            candidates.append((score, -index, sentence))
+    return max(candidates)[2] if candidates else ""
+
+
+def _decision_points(parts, decision: str, rating: str, rating_zh: str) -> str:
+    """在决策卡内回答三件事：依据是什么、分歧在哪里、最大的风险是什么。"""
+    thesis = _field(decision, "Investment Thesis") or _field(decision, "Rationale")
+    thesis_sentences = _sentences(thesis)
+    tone = _TONE.get(rating, "level")
+    evidence_words = {
+        "up": ["多头", "增长", "改善", "支撑", "上行", "低估", "增持", "买入", "优势"],
+        "down": ["空头", "风险收益", "减持", "卖出", "下行", "不佳", "偏弱", "谨慎", "尚未", "死叉", "高估"],
+        "level": ["中性", "持有", "平衡", "等待", "分歧", "震荡"],
+    }[tone]
+    core = _best_sentence(thesis_sentences, evidence_words + ["但", "综合看"])
+    if not core and thesis_sentences:
+        core = thesis_sentences[0]
+    # 单独放进卡片时删去句首连接词，避免读者找不到被转折的前句。
+    core_source = core
+    core = re.sub(r"^(?:但|然而|不过)", "", core)
+
+    risk_texts = [thesis]
+    for heading, _folder, written in parts:
+        if "Risk Management" in heading:
+            risk_texts.extend(text for _agent, _filename, text in written)
+    risk_sentences = [s for text in risk_texts for s in _sentences(text)]
+    risk = _best_sentence(
+        risk_sentences,
+        ["风险", "止损", "跌破", "下行", "不确定", "缺失", "尚未", "未见", "回撤", "跳空"],
+        exclude=core_source,
+    )
+
+    names = {
+        "Market Analyst": "行情", "Fundamentals Analyst": "基本面",
+        "News Analyst": "新闻宏观", "Sentiment Analyst": "情绪",
+    }
+    views = []
+    for _heading, _folder, written in parts:
+        for agent, _filename, text in written:
+            if agent in names:
+                view_rating = _angle_rating(text)
+                if view_rating:
+                    views.append((names[agent], _RATING_ZH.get(view_rating, view_rating), _TONE.get(view_rating, "level")))
+    disagreement = ""
+    opposite = "down" if tone == "up" else "up" if tone == "down" else ""
+    conflicting = [f"{name}{view_rating}" for name, view_rating, view_tone in views if view_tone == opposite]
+    if conflicting and rating:
+        disagreement = f"{'、'.join(conflicting)}，最终结论为{rating_zh}，存在方向分歧。"
+    elif {"up", "down"}.issubset({view_tone for _n, _r, view_tone in views}):
+        disagreement = f"分析师视角存在多空分歧，最终结论为{rating_zh}。" if rating else "分析师视角存在多空分歧。"
+    elif len(views) >= 2 and rating:
+        disagreement = "各视角与最终结论未见明显方向冲突。"
+
+    rows = [("核心依据", core), ("主要分歧", disagreement), ("首要风险", risk)]
+    visible = []
+    for label, value in rows:
+        value = _lead(_localize_text(value), 76)
+        if value:
+            visible.append(f'<div class="verdict-point"><dt>{label}</dt><dd>{escape(value)}</dd></div>')
+    return f'<dl class="verdict-points">{"".join(visible)}</dl>' if visible else ""
+
+
 # 模型写的时间窗口有英文有中文，统一成本地读法。
 _UNIT_ZH = {
     "day": "天", "days": "天", "week": "周", "weeks": "周",
@@ -834,6 +919,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     decision_link = (
         f'<a class="verdict-more" href="{decision_anchor}">完整决策 →</a>' if decision else ""
     )
+    points_html = _decision_points(parts, decision, rating, rating_zh) if decision else ""
 
     angles_html = _analysis_angles(md, parts)
 
@@ -888,6 +974,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     </div>
     <p class="verdict-rating">{escape(rating_zh)}</p>
     {lead_html}
+    {points_html}
     <dl class="verdict-metrics">{metrics_html}</dl>
   </section>
   {angles_html}
