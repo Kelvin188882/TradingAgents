@@ -1,0 +1,16 @@
+{
+  "cash": 100000,
+  "currency": "HKD",
+  "positions": [
+    {
+      "ticker": "0700.HK",
+      "quantity": 200,
+      "average_price": 420.5
+    },
+    {
+      "ticker": "600519.SS",
+      "quantity": 100,
+      "average_price": 1450.0
+    }
+  ]
+}

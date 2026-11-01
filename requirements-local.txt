@@ -1,0 +1,3 @@
+# 本地追加依赖（不写入 pyproject，避免与上游同步时冲突）
+# 安装：.venv/bin/pip install -r requirements-local.txt
+akshare>=1.20
