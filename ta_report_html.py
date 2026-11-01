@@ -209,6 +209,21 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 .ticker-search label { display: block; font: 600 12px/1.5 var(--sans); color: var(--muted); }
 .ticker-name { min-width: 0; font: 600 13px/1.5 var(--sans); color: var(--ink-2); text-align: right; }
 .ticker-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-2); }
+.symbol-results {
+  display: none; max-height: 18rem; overflow-y: auto; margin: var(--sp-2) 0 0; padding: var(--sp-1);
+  border: 1px solid var(--edge); border-radius: 8px; background: var(--surface);
+  box-shadow: 0 8px 24px rgb(0 0 0 / .08); list-style: none;
+}
+.symbol-results.open { display: block; }
+.symbol-results button {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4);
+  width: 100%; min-height: 44px; padding: var(--sp-2) var(--sp-3); border: 0; border-radius: 5px;
+  background: transparent; color: var(--ink); text-align: left; cursor: pointer;
+}
+.symbol-results button:hover, .symbol-results button:focus-visible { background: var(--wash); outline: none; }
+.symbol-name { min-width: 0; font: 600 14px/1.5 var(--sans); }
+.symbol-meta { flex: none; font: 500 12px/1.5 var(--mono); color: var(--muted); }
+.symbol-empty { padding: var(--sp-3); font-size: 13px; color: var(--muted); }
 .ticker-controls input {
   min-width: 0; height: 44px; padding: 0 var(--sp-3); border: 1px solid var(--edge);
   border-radius: 7px; background: var(--surface); color: var(--ink);
@@ -1117,14 +1132,16 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
   <p class="sub">分析日期 <span class="nowrap">{escape(date) if date else "—"}</span>　·　多智能体研判</p>
 
   <form class="ticker-search" id="ticker-search">
-    <div class="ticker-label"><label for="ticker-input">个股编码</label><span class="ticker-name" id="ticker-name">{escape(stock_name)}</span></div>
+    <div class="ticker-label"><label for="ticker-input">个股编码 / 名称</label><span class="ticker-name" id="ticker-name">{escape(stock_name)}</span></div>
     <div class="ticker-controls">
       <input id="ticker-input" name="ticker" type="text" inputmode="text" autocomplete="off"
-             autocapitalize="characters" spellcheck="false" maxlength="10" required value="{escape(ticker)}"
-             placeholder="如 600519 / 0700.HK" aria-describedby="ticker-name ticker-status">
+             autocapitalize="characters" spellcheck="false" maxlength="40" required value="{escape(ticker)}"
+             placeholder="如 600519 / 贵州茅台" aria-describedby="ticker-name ticker-status"
+             role="combobox" aria-autocomplete="list" aria-controls="symbol-results" aria-expanded="false">
       <button id="ticker-submit" type="submit">开始分析</button>
     </div>
-    <p class="ticker-status" id="ticker-status" aria-live="polite">支持 A 股及港股，生成新的完整分析报告</p>
+    <ul class="symbol-results" id="symbol-results" role="listbox" aria-label="股票搜索结果"></ul>
+    <p class="ticker-status" id="ticker-status" aria-live="polite">支持 A 股及港股代码或名称搜索</p>
   </form>
 
   <section class="verdict {tone}" aria-label="最终结论">
@@ -1183,29 +1200,103 @@ _REPORT_JS = r"""
   const button = document.getElementById("ticker-submit");
   const status = document.getElementById("ticker-status");
   const nameLabel = document.getElementById("ticker-name");
+  const results = document.getElementById("symbol-results");
   let nameTimer = null;
   let nameRequest = 0;
 
-  async function lookupName(value) {
+  function closeResults() {
+    results.classList.remove("open");
+    input.setAttribute("aria-expanded", "false");
+  }
+  function selectCandidate(candidate) {
+    nameRequest += 1;
+    input.value = candidate.ticker;
+    nameLabel.textContent = candidate.name;
+    closeResults();
+    message("已选择股票，可开始分析");
+    input.focus();
+  }
+  function renderCandidates(items) {
+    results.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement("li");
+      empty.className = "symbol-empty";
+      empty.textContent = "未找到匹配的 A 股或港股";
+      results.append(empty);
+    } else {
+      items.forEach((candidate, index) => {
+        const item = document.createElement("li");
+        const option = document.createElement("button");
+        option.type = "button";
+        option.setAttribute("role", "option");
+        const name = document.createElement("span");
+        name.className = "symbol-name";
+        name.textContent = candidate.name;
+        const meta = document.createElement("span");
+        meta.className = "symbol-meta";
+        meta.textContent = `${candidate.ticker} · ${candidate.market}`;
+        option.append(name, meta);
+        option.addEventListener("click", () => selectCandidate(candidate));
+        option.addEventListener("keydown", event => {
+          if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+          event.preventDefault();
+          const next = event.key === "ArrowDown" ? index + 1 : index - 1;
+          const buttons = results.querySelectorAll("button");
+          if (buttons[next]) buttons[next].focus();
+        });
+        item.append(option);
+        results.append(item);
+      });
+    }
+    results.classList.add("open");
+    input.setAttribute("aria-expanded", "true");
+  }
+  async function searchSymbols(value) {
+    const response = await fetch(`/api/symbols?q=${encodeURIComponent(value)}`, {cache: "no-store"});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "名称搜索失败");
+    return data.results || [];
+  }
+  async function lookupSymbols(value) {
     const requestId = ++nameRequest;
     try {
-      const response = await fetch(`/api/stock-name?ticker=${encodeURIComponent(value)}`, {cache: "no-store"});
-      if (!response.ok || requestId !== nameRequest) return;
-      const data = await response.json();
-      if (requestId === nameRequest) nameLabel.textContent = data.name || "未识别到股票名称";
-    } catch (_) {
-      // 名称只是辅助信息；网络失败不影响输入与提交。
+      const items = await searchSymbols(value);
+      if (requestId !== nameRequest || input.value.trim() !== value) return;
+      nameLabel.textContent = items.length === 1 ? items[0].name : items.length ? `${items.length} 个匹配结果` : "";
+      renderCandidates(items);
+    } catch (error) {
+      if (requestId === nameRequest) message(error.message, true);
     }
+  }
+  async function resolveName(ticker) {
+    const requestId = ++nameRequest;
+    try {
+      const response = await fetch(`/api/stock-name?ticker=${encodeURIComponent(ticker)}`, {cache: "no-store"});
+      const data = await response.json();
+      if (response.ok && requestId === nameRequest) nameLabel.textContent = data.name || "";
+    } catch (_) {}
   }
 
   input.addEventListener("input", () => {
-    nameRequest += 1;  // 让上一次代码的慢响应立即失效，避免名称串码。
+    nameRequest += 1;
     nameLabel.textContent = "";
+    closeResults();
     window.clearTimeout(nameTimer);
     const value = input.value.trim();
     if (value && location.protocol !== "file:") {
-      nameTimer = window.setTimeout(() => lookupName(value), 400);
+      nameTimer = window.setTimeout(() => lookupSymbols(value), 400);
     }
+  });
+  input.addEventListener("keydown", event => {
+    if (event.key === "Escape") closeResults();
+    if (event.key === "ArrowDown" && results.classList.contains("open")) {
+      event.preventDefault();
+      const first = results.querySelector("button");
+      if (first) first.focus();
+    }
+  });
+  document.addEventListener("click", event => {
+    if (!form.contains(event.target)) closeResults();
   });
 
   function busy(value) {
@@ -1251,16 +1342,33 @@ _REPORT_JS = r"""
       return;
     }
     busy(true);
-    message("正在提交分析…");
     try {
+      let ticker = input.value.trim();
+      const codePattern = /^\d{1,6}(?:\.(?:SS|SH|SZ|BJ|HK))?$/i;
+      if (!codePattern.test(ticker)) {
+        message("正在识别股票名称…");
+        const found = await searchSymbols(ticker);
+        const exact = found.filter(item => item.name.toLocaleLowerCase() === ticker.toLocaleLowerCase());
+        const chosen = exact.length === 1 ? exact[0] : found.length === 1 ? found[0] : null;
+        if (!chosen) {
+          renderCandidates(found);
+          busy(false);
+          message(found.length ? "有多个匹配结果，请先选择对应股票" : "未找到匹配股票，请更换名称或直接输入代码", true);
+          return;
+        }
+        selectCandidate(chosen);
+        ticker = chosen.ticker;
+      }
+      closeResults();
+      message("正在提交分析…");
       const response = await fetch("/api/analyze", {
         method: "POST", headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({ticker: input.value})
+        body: JSON.stringify({ticker})
       });
       const data = await response.json();
       if (!data.job) throw new Error(data.error || "提交失败");
       input.value = data.job.ticker;
-      lookupName(data.job.ticker);
+      resolveName(data.job.ticker);
       watch(data.job.id);
     } catch (error) {
       busy(false);
@@ -1272,6 +1380,7 @@ _REPORT_JS = r"""
     fetch("/api/active", {cache: "no-store"}).then(response => response.json()).then(data => {
       if (data.job) {
         input.value = data.job.ticker;
+        resolveName(data.job.ticker);
         watch(data.job.id);
       }
     }).catch(() => {});

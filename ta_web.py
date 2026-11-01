@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
@@ -65,7 +65,7 @@ def normalize_ticker(raw: str) -> str:
     if suffix == "HK" or (not suffix and len(digits) <= 5 and digits.startswith("0")):
         if len(digits) > 5:
             raise ValueError("港股代码应为 1–5 位数字，例如 0700.HK")
-        return f"{digits.zfill(4)}.HK"
+        return f"{str(int(digits)).zfill(4)}.HK"
     if len(digits) != 6:
         raise ValueError("A 股代码应为 6 位数字，例如 600519 或 000001.SZ")
     if suffix in {"SS", "SH"}:
@@ -114,6 +114,69 @@ def resolve_stock_name(raw: str) -> tuple[str, str | None]:
         # 名称缓存一天；识别失败只缓存五分钟，避免源站抖动造成长期缺失。
         _NAME_CACHE[ticker] = (now + (86400 if name else 300), name)
     return ticker, name
+
+
+_SEARCH_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+def search_symbols(raw: str, limit: int = 8) -> list[dict]:
+    """按名称或代码搜索 A 股 / 港股，过滤基金、期货、ADR 等不可分析标的。"""
+    query = str(raw or "").strip()
+    if not query or len(query) > 40 or any(ord(char) < 32 for char in query):
+        raise ValueError("请输入股票名称或代码")
+    now = time.time()
+    with _NAME_LOCK:
+        cached = _SEARCH_CACHE.get(query.casefold())
+    if cached and cached[0] > now:
+        return cached[1][:limit]
+
+    params = urlencode({
+        "input": query, "type": 14,
+        "token": "D43BF722C8E33BD8A4A3B49E7C4A9C1C", "count": 20,
+    })
+    request = Request(
+        f"https://searchapi.eastmoney.com/api/suggest/get?{params}",
+        headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"},
+    )
+    try:
+        with urlopen(request, timeout=5) as response:
+            payload = json.load(response)
+        records = (payload.get("QuotationCodeTable") or {}).get("Data") or []
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("名称搜索暂时不可用，请改用股票代码") from exc
+
+    markets = {"沪A": "SS", "深A": "SZ", "京A": "BJ"}
+    results = []
+    seen = set()
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        classify = item.get("Classify")
+        security_type = item.get("SecurityTypeName", "")
+        code = str(item.get("Code", "")).strip()
+        name = str(item.get("Name", "")).strip()
+        if not code.isdigit() or not name or len(name) > 80:
+            continue
+        try:
+            if classify == "AStock" and security_type in markets:
+                ticker = normalize_ticker(f"{code}.{markets[security_type]}")
+            elif classify == "HK" and security_type == "港股" and str(item.get("TypeUS")) == "3":
+                ticker = normalize_ticker(f"{code}.HK")
+            else:
+                continue
+        except ValueError:
+            continue
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        results.append({"ticker": ticker, "name": name, "market": security_type})
+    results.sort(key=lambda item: (
+        item["name"].casefold() != query.casefold(),
+        item["ticker"].split(".", 1)[0].lstrip("0") != query.lstrip("0"),
+    ))
+    with _NAME_LOCK:
+        _SEARCH_CACHE[query.casefold()] = (now + 300, results)
+    return results[:limit]
 
 
 def list_reports(ticker: str | None = None) -> list[Path]:
@@ -254,6 +317,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "/")
             self.end_headers()
+            return
+        if path == "/api/symbols":
+            raw = parse_qs(urlparse(self.path).query).get("q", [""])[0]
+            try:
+                results = search_symbols(raw)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+                return
+            except RuntimeError as exc:
+                self._json({"error": str(exc)}, 503)
+                return
+            self._json({"results": results})
             return
         if path == "/api/stock-name":
             raw = parse_qs(urlparse(self.path).query).get("ticker", [""])[0]
