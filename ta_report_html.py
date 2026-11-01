@@ -203,11 +203,11 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 .nowrap { white-space: nowrap; }
 
 /* 决策卡：整份报告唯一的「3 秒读懂」区域。
-   评级在上、关键数字在下，中间一条细线分开——横排四格在窄栏里会把日期挤断。 */
+   最终结论 → 两行摘要 → 三项关键数据；不把同一决策拆成卡片外的第二段。 */
 .verdict {
   --tone: var(--level);
   margin: var(--sp-8) 0 0;
-  padding: var(--sp-6) var(--sp-6) var(--sp-4);
+  padding: var(--sp-6);
   background: var(--surface);
   border: 1px solid var(--hairline);
   border-radius: 12px;
@@ -217,18 +217,19 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 .verdict.down { --tone: var(--down); }
 .verdict.level { --tone: var(--level); }
 
-.verdict-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--sp-2) var(--sp-3); }
+.verdict-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-4); }
 .verdict-kicker {
-  margin: 0; flex-basis: 100%; font: 600 11.5px/1 var(--sans);
-  letter-spacing: 0.14em; color: var(--muted);
+  margin: 0; font: 600 12px/1.4 var(--sans);
+  letter-spacing: 0.12em; color: var(--muted);
 }
+.verdict-more { font-size: 13px; line-height: 1.5; white-space: nowrap; }
 .verdict-rating {
-  margin: 0; font: 700 1.875rem/1.15 var(--sans); letter-spacing: -0.01em; color: var(--tone);
+  margin: var(--sp-1) 0 0; font: 700 1.875rem/1.15 var(--sans);
+  letter-spacing: -0.01em; color: var(--tone);
 }
-.verdict-en { font: 500 12.5px/1 var(--sans); letter-spacing: 0.03em; color: var(--muted); }
 
 .verdict-metrics {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--sp-4); margin: var(--sp-4) 0 0; padding-top: var(--sp-4);
   border-top: 1px solid var(--hairline);
 }
@@ -243,9 +244,10 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 }
 
 .verdict-lead {
-  margin: var(--sp-4) 0 0; font-size: 15px; line-height: 1.85; color: var(--ink-2);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; margin: var(--sp-3) 0 0;
+  font-size: 15px; line-height: 1.75; color: var(--ink-2);
 }
-.verdict-lead .more { white-space: nowrap; font-size: 14px; }
 
 /* 分析角度汇总：首屏第二级信息，不与投资评级争夺主视觉。
    整卡点击、两行摘要，去掉额外表格线，让视线只停留在角度、评级和结论上。 */
@@ -768,8 +770,6 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     target = _field(decision, "Price Target")
     horizon = _localize_span(_field(decision, "Time Horizon"))
     summary = _field(decision, "Executive Summary")
-    analysts = settings.get("analysts") if settings else None
-    analyst_count = len(analyst_names(analysts)) if analysts else 0
     if target.strip().lower() in ("not provided", "n/a", "na", "—", "-", "none"):
         target = ""
     if horizon.strip().lower() in ("not provided", "n/a", "na", "—", "-", "none"):
@@ -786,20 +786,19 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
         ("目标价", target or "未给出"),
         ("时间窗口", horizon or "未给出"),
         ("分析日期", date or "—"),
-        ("分析师", f"{analyst_count} 位" if analyst_count else "—"),
     ]
     metrics_html = "".join(
         f"<div><dt>{label}</dt><dd>{escape(value)}</dd></div>" for label, value in metrics
     )
 
-    lead = _lead(summary)
-    lead_html = (
-        f'<p class="verdict-lead">{escape(lead)}'
-        + (f' <a class="more" href="{decision_anchor}">查看完整决策 →</a>'
-           if summary and len(summary) > len(lead) else "")
-        + "</p>"
-        if lead
-        else ""
+    # 首屏已有 ticker 与中文评级，摘要不再重复「对 XXX 给予 Underweight」。
+    lead_source = re.sub(
+        r"^\s*对\s*\S+\s*给予\s*[A-Za-z]+\s*[:：]\s*", "", summary, count=1, flags=re.IGNORECASE
+    )
+    lead = _lead(lead_source, 92)
+    lead_html = f'<p class="verdict-lead">{escape(lead)}</p>' if lead else ""
+    decision_link = (
+        f'<a class="verdict-more" href="{decision_anchor}">完整决策 →</a>' if decision else ""
     )
 
     angles_html = _analysis_angles(md, parts)
@@ -848,15 +847,15 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
   <h1><span class="ticker">{escape(ticker)}</span><span class="market">{escape(_market_label(ticker))}</span></h1>
   <p class="sub">分析日期 <span class="nowrap">{escape(date) if date else "—"}</span>　·　多智能体研判</p>
 
-  <section class="verdict {tone}" aria-label="投资评级">
+  <section class="verdict {tone}" aria-label="最终结论">
     <div class="verdict-head">
-      <p class="verdict-kicker">投资评级</p>
-      <p class="verdict-rating">{escape(rating_zh)}</p>
-      <span class="verdict-en">{escape(rating or "REVIEW")}</span>
+      <p class="verdict-kicker">最终结论</p>
+      {decision_link}
     </div>
+    <p class="verdict-rating">{escape(rating_zh)}</p>
+    {lead_html}
     <dl class="verdict-metrics">{metrics_html}</dl>
   </section>
-  {lead_html}
   {angles_html}
 
   <details class="run">
