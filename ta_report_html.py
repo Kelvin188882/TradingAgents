@@ -202,6 +202,28 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 .hero .sub { margin: var(--sp-3) 0 0; font-size: 14px; line-height: 1.6; color: var(--muted); }
 .nowrap { white-space: nowrap; }
 
+/* 个股入口：一行完成输入与提交；本地服务提供接口，静态文件仍可正常阅读。 */
+.ticker-search { margin: var(--sp-6) 0 0; }
+.ticker-search label { display: block; margin-bottom: var(--sp-2); font: 600 12px/1.5 var(--sans); color: var(--muted); }
+.ticker-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-2); }
+.ticker-controls input {
+  min-width: 0; height: 44px; padding: 0 var(--sp-3); border: 1px solid var(--edge);
+  border-radius: 7px; background: var(--surface); color: var(--ink);
+  font: 500 15px/1 var(--mono); text-transform: uppercase;
+}
+.ticker-controls input::placeholder { color: var(--muted); text-transform: none; }
+.ticker-controls input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-color: var(--accent); }
+.ticker-controls button {
+  min-width: 6.5rem; height: 44px; padding: 0 var(--sp-4); border: 1px solid var(--accent);
+  border-radius: 7px; background: var(--accent); color: #fff;
+  font: 600 14px/1 var(--sans); cursor: pointer;
+}
+.ticker-controls button:hover { filter: brightness(1.08); }
+.ticker-controls button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.ticker-controls button:disabled { opacity: 0.58; cursor: wait; }
+.ticker-status { min-height: 1.5em; margin: var(--sp-2) 0 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.ticker-status.error { color: var(--down); }
+
 /* 决策卡：整份报告唯一的「3 秒读懂」区域。
    最终结论 → 两行摘要 → 三项关键数据；不把同一决策拆成卡片外的第二段。 */
 .verdict {
@@ -495,6 +517,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .page { padding: 0 var(--sp-4) var(--sp-12); }
   .hero h1 { font-size: 1.625rem; }
   .hero .sub { font-size: 13px; }
+  .ticker-controls { grid-template-columns: minmax(0, 1fr); }
+  .ticker-controls button { width: 100%; }
   .verdict { padding: var(--sp-4) var(--sp-4) var(--sp-4) var(--sp-6); }
   .run dl { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
   .run dd { margin-bottom: var(--sp-3); }
@@ -514,7 +538,7 @@ tbody tr:last-child td { border-bottom: 0; }
   body { font-size: 10.5pt; line-height: 1.7; }
   .page { max-width: none; padding: 0; }
   .grid { display: block; }
-  .toc, .toc-mobile, .to-top, .run { display: none; }
+  .toc, .toc-mobile, .to-top, .run, .ticker-search { display: none; }
   .verdict, .angle { break-inside: avoid; box-shadow: none; }
   .angles-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .angle-more { display: none; }
@@ -1058,7 +1082,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'">
 <title>{escape(page_title)} · 分析报告</title>
 <style>{_CSS}</style>
 </head>
@@ -1070,6 +1094,17 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
   <p class="eyebrow">{logo}<span class="divider"></span><span>TradingAgents 深度分析报告</span></p>
   <h1><span class="ticker">{escape(ticker)}</span><span class="market">{escape(_market_label(ticker))}</span></h1>
   <p class="sub">分析日期 <span class="nowrap">{escape(date) if date else "—"}</span>　·　多智能体研判</p>
+
+  <form class="ticker-search" id="ticker-search">
+    <label for="ticker-input">个股编码</label>
+    <div class="ticker-controls">
+      <input id="ticker-input" name="ticker" type="text" inputmode="text" autocomplete="off"
+             autocapitalize="characters" spellcheck="false" maxlength="10" required
+             placeholder="如 600519 / 0700.HK" aria-describedby="ticker-status">
+      <button id="ticker-submit" type="submit">开始分析</button>
+    </div>
+    <p class="ticker-status" id="ticker-status" aria-live="polite">支持 A 股及港股，生成新的完整分析报告</p>
+  </form>
 
   <section class="verdict {tone}" aria-label="最终结论">
     <div class="verdict-head">
@@ -1113,8 +1148,88 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
 </footer>
 </div>
 <a class="to-top" href="#top">回到顶部</a>
+<script>{_REPORT_JS}</script>
 </body>
 </html>
+"""
+
+
+_REPORT_JS = r"""
+(() => {
+  const form = document.getElementById("ticker-search");
+  if (!form) return;
+  const input = document.getElementById("ticker-input");
+  const button = document.getElementById("ticker-submit");
+  const status = document.getElementById("ticker-status");
+
+  function busy(value) {
+    input.readOnly = value;
+    button.disabled = value;
+    button.textContent = value ? "分析中…" : "开始分析";
+    form.setAttribute("aria-busy", String(value));
+  }
+  function message(text, isError = false) {
+    status.textContent = text;
+    status.classList.toggle("error", isError);
+  }
+  async function watch(jobId) {
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {cache: "no-store"});
+      const data = await response.json();
+      if (!response.ok || !data.job) throw new Error(data.error || "无法读取分析状态");
+      const job = data.job;
+      if (job.status === "completed" && job.report_url) {
+        message("报告已生成，正在打开…");
+        window.setTimeout(() => window.location.assign(job.report_url), 400);
+        return;
+      }
+      if (job.status === "failed") {
+        busy(false);
+        message(job.message || "分析未完成，请稍后重试", true);
+        return;
+      }
+      busy(true);
+      const elapsed = job.elapsed_seconds == null ? "" : `，已用时 ${job.elapsed_seconds} 秒`;
+      message(`${job.ticker} 正在分析${elapsed}，请保持本页开启`);
+      window.setTimeout(() => watch(jobId), 2000);
+    } catch (error) {
+      busy(false);
+      message(`状态连接中断：${error.message}。请确认本地页面服务仍在运行。`, true);
+    }
+  }
+
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (location.protocol === "file:") {
+      message("静态预览不能发起分析；请在项目目录运行 ./web.sh 后使用。", true);
+      return;
+    }
+    busy(true);
+    message("正在提交分析…");
+    try {
+      const response = await fetch("/api/analyze", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ticker: input.value})
+      });
+      const data = await response.json();
+      if (!data.job) throw new Error(data.error || "提交失败");
+      input.value = data.job.ticker;
+      watch(data.job.id);
+    } catch (error) {
+      busy(false);
+      message(error.message, true);
+    }
+  });
+
+  if (location.protocol !== "file:") {
+    fetch("/api/active", {cache: "no-store"}).then(response => response.json()).then(data => {
+      if (data.job) {
+        input.value = data.job.ticker;
+        watch(data.job.id);
+      }
+    }).catch(() => {});
+  }
+})();
 """
 
 
