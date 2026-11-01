@@ -17,7 +17,8 @@ import uuid
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parent
 
@@ -76,6 +77,43 @@ def normalize_ticker(raw: str) -> str:
     if digits[0] in {"4", "8"}:
         return f"{digits}.BJ"
     return f"{digits}.SZ"
+
+
+_NAME_CACHE: dict[str, tuple[float, str | None]] = {}
+_NAME_LOCK = threading.Lock()
+
+
+def resolve_stock_name(raw: str) -> tuple[str, str | None]:
+    """用新浪实时行情返回的名称识别 A 股 / 港股；失败不影响按代码分析。"""
+    ticker = normalize_ticker(raw)
+    now = time.time()
+    with _NAME_LOCK:
+        cached = _NAME_CACHE.get(ticker)
+    if cached and cached[0] > now:
+        return ticker, cached[1]
+
+    digits, market = ticker.split(".")
+    prefix = {"SS": "sh", "SZ": "sz", "BJ": "bj"}.get(market, "")
+    symbol = f"hk{digits.zfill(5)}" if market == "HK" else f"{prefix}{digits}"
+    name = None
+    try:
+        request = Request(
+            f"https://hq.sinajs.cn/list={symbol}",
+            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"},
+        )
+        with urlopen(request, timeout=4) as response:
+            text = response.read().decode("gb18030")
+        match = re.search(r'=\"([^\"]*)\"', text)
+        fields = match.group(1).split(",") if match else []
+        candidate = (fields[1] if market == "HK" and len(fields) > 1 else fields[0] if fields else "").strip()
+        if candidate and len(candidate) <= 80 and not any(ord(char) < 32 for char in candidate):
+            name = candidate
+    except (OSError, UnicodeError, ValueError, IndexError):
+        pass
+    with _NAME_LOCK:
+        # 名称缓存一天；识别失败只缓存五分钟，避免源站抖动造成长期缺失。
+        _NAME_CACHE[ticker] = (now + (86400 if name else 300), name)
+    return ticker, name
 
 
 def list_reports(ticker: str | None = None) -> list[Path]:
@@ -216,6 +254,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "/")
             self.end_headers()
+            return
+        if path == "/api/stock-name":
+            raw = parse_qs(urlparse(self.path).query).get("ticker", [""])[0]
+            try:
+                ticker, name = resolve_stock_name(raw)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+                return
+            self._json({"ticker": ticker, "name": name})
             return
         if path == "/api/active":
             self._json({"job": MANAGER.active()})

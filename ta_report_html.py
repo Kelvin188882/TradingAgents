@@ -194,6 +194,7 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
   display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3) var(--sp-4);
   margin: 0; font: 650 2.125rem/1.25 var(--sans); letter-spacing: -0.012em;
 }
+.hero h1.has-name .ticker { font: 500 1.125rem/1.4 var(--mono); color: var(--muted); letter-spacing: 0; }
 .hero .market {
   flex: none; font: 600 12px/1 var(--sans); letter-spacing: 0.06em;
   padding: 5px 8px 5px 9px; border-radius: 4px;
@@ -204,7 +205,9 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 
 /* 个股入口：一行完成输入与提交；本地服务提供接口，静态文件仍可正常阅读。 */
 .ticker-search { margin: var(--sp-6) 0 0; }
-.ticker-search label { display: block; margin-bottom: var(--sp-2); font: 600 12px/1.5 var(--sans); color: var(--muted); }
+.ticker-label { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-3); margin-bottom: var(--sp-2); }
+.ticker-search label { display: block; font: 600 12px/1.5 var(--sans); color: var(--muted); }
+.ticker-name { min-width: 0; font: 600 13px/1.5 var(--sans); color: var(--ink-2); text-align: right; }
 .ticker-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--sp-2); }
 .ticker-controls input {
   min-width: 0; height: 44px; padding: 0 var(--sp-3); border: 1px solid var(--edge);
@@ -1004,6 +1007,21 @@ def _toc(parts) -> str:
     return f'<ol>{"".join(items)}</ol>'
 
 
+def _report_stock_name(parts, ticker: str) -> str:
+    """从分析师原标题提取短名称，不使用公司全称，也不新增网络请求。"""
+    for _heading, _folder, written in parts:
+        for _agent, _filename, text in written:
+            for line in text.splitlines()[:8]:
+                if not line.startswith("#"):
+                    continue
+                match = re.search(rf"{re.escape(ticker)}[（(]([^）)\n]{{1,40}})[）)]", line)
+                if not match:
+                    match = re.search(rf"^#+\s*([^（）()\n]{{1,40}}?)[（(]{re.escape(ticker)}[）)]", line)
+                if match:
+                    return _plain(match.group(1))
+    return ""
+
+
 def render_report(ticker: str, final_state: dict, settings: dict | None, parts) -> str:
     """一页式报告：首屏决策卡 + 中文排版正文 + 常驻目录。"""
     md = _markdown()
@@ -1075,7 +1093,10 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
 
     toc = _toc(parts)
     logo = f'<a class="brand" href="{_COMPANY}" rel="noopener" aria-label="Tauric Research">{_LOGO}</a>' if _LOGO else ""
-    page_title = " ".join(x for x in (ticker, date, rating_zh) if x)
+    stock_name = _report_stock_name(parts, ticker)
+    stock_name_html = f'<span class="stock-name">{escape(stock_name)}</span>' if stock_name else ""
+    h1_class = "has-name" if stock_name else ""
+    page_title = " ".join(x for x in (stock_name, ticker, date, rating_zh) if x)
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -1092,15 +1113,15 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
 
 <header class="hero">
   <p class="eyebrow">{logo}<span class="divider"></span><span>TradingAgents 深度分析报告</span></p>
-  <h1><span class="ticker">{escape(ticker)}</span><span class="market">{escape(_market_label(ticker))}</span></h1>
+  <h1 class="{h1_class}">{stock_name_html}<span class="ticker">{escape(ticker)}</span><span class="market">{escape(_market_label(ticker))}</span></h1>
   <p class="sub">分析日期 <span class="nowrap">{escape(date) if date else "—"}</span>　·　多智能体研判</p>
 
   <form class="ticker-search" id="ticker-search">
-    <label for="ticker-input">个股编码</label>
+    <div class="ticker-label"><label for="ticker-input">个股编码</label><span class="ticker-name" id="ticker-name">{escape(stock_name)}</span></div>
     <div class="ticker-controls">
       <input id="ticker-input" name="ticker" type="text" inputmode="text" autocomplete="off"
-             autocapitalize="characters" spellcheck="false" maxlength="10" required
-             placeholder="如 600519 / 0700.HK" aria-describedby="ticker-status">
+             autocapitalize="characters" spellcheck="false" maxlength="10" required value="{escape(ticker)}"
+             placeholder="如 600519 / 0700.HK" aria-describedby="ticker-name ticker-status">
       <button id="ticker-submit" type="submit">开始分析</button>
     </div>
     <p class="ticker-status" id="ticker-status" aria-live="polite">支持 A 股及港股，生成新的完整分析报告</p>
@@ -1161,6 +1182,31 @@ _REPORT_JS = r"""
   const input = document.getElementById("ticker-input");
   const button = document.getElementById("ticker-submit");
   const status = document.getElementById("ticker-status");
+  const nameLabel = document.getElementById("ticker-name");
+  let nameTimer = null;
+  let nameRequest = 0;
+
+  async function lookupName(value) {
+    const requestId = ++nameRequest;
+    try {
+      const response = await fetch(`/api/stock-name?ticker=${encodeURIComponent(value)}`, {cache: "no-store"});
+      if (!response.ok || requestId !== nameRequest) return;
+      const data = await response.json();
+      if (requestId === nameRequest) nameLabel.textContent = data.name || "未识别到股票名称";
+    } catch (_) {
+      // 名称只是辅助信息；网络失败不影响输入与提交。
+    }
+  }
+
+  input.addEventListener("input", () => {
+    nameRequest += 1;  // 让上一次代码的慢响应立即失效，避免名称串码。
+    nameLabel.textContent = "";
+    window.clearTimeout(nameTimer);
+    const value = input.value.trim();
+    if (value && location.protocol !== "file:") {
+      nameTimer = window.setTimeout(() => lookupName(value), 400);
+    }
+  });
 
   function busy(value) {
     input.readOnly = value;
@@ -1214,6 +1260,7 @@ _REPORT_JS = r"""
       const data = await response.json();
       if (!data.job) throw new Error(data.error || "提交失败");
       input.value = data.job.ticker;
+      lookupName(data.job.ticker);
       watch(data.job.id);
     } catch (error) {
       busy(false);
