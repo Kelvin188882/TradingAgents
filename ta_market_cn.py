@@ -1,15 +1,22 @@
-"""A 股 / 港股行情备用源（akshare）。
+"""A 股 / 港股行情数据源（akshare，双后端级联）。
 
-问题：上游的行情与指标数据全部来自 yfinance，而 Yahoo 对同一 IP 的限流非常敏感
-（实测连续跑两三次分析就会返回 Too Many Requests，整条分析链瘫痪）。
+问题一：上游行情与指标全部来自 yfinance，Yahoo 对同一 IP 限流极敏感，连续跑两三次
+就会整条链路瘫痪。
 
-这里用 akshare 的东方财富接口做兜底，接在两个位置：
-1. `get_stock_data` 工具 —— 注册为 vendor `akshare_cn`，链路设为 `yfinance,akshare_cn`；
+问题二（实测才发现）：只补一家兜底源不够。东方财富 push2 同样按 IP 限流，压测几轮
+之后 yfinance 和东财会同时不可用。所以这里接两家互相独立的源，按顺序级联：
+
+    东方财富 push2（akshare stock_zh_a_hist / stock_hk_hist）
+       ↓ 失败
+    新浪财经（akshare stock_zh_a_daily / stock_hk_daily）
+
+接在两个位置：
+1. `get_stock_data` 工具 —— 注册为 vendor `akshare_cn`，链路 `yfinance,akshare_cn`；
 2. `load_ohlcv` —— 技术指标与快照都靠它取数，这里包一层：yfinance 抛错时改用
-   akshare 取数，再复用上游的清洗、时点过滤、缺口填充、陈旧校验逻辑。
+   上面两家取数，再复用上游的清洗、时点过滤、缺口填充、陈旧校验逻辑。
 
-代价与差异：akshare 用前复权（qfq）价格，yfinance 用 auto_adjust，两者在复权
-基准日附近可能有个位数差异；成交量单位都是股。
+代价与差异：两家都用前复权（qfq），yfinance 用 auto_adjust，在复权基准日附近
+可能有个位数差异；成交量单位都是股。
 """
 import logging
 import time
@@ -24,7 +31,7 @@ logger = logging.getLogger(__name__)
 _MEM_TTL_SECONDS = 600
 _MEM: dict[str, tuple[float, pd.DataFrame]] = {}
 
-_COLUMN_MAP = {
+_EM_COLUMN_MAP = {
     "日期": "Date",
     "开盘": "Open",
     "收盘": "Close",
@@ -32,6 +39,18 @@ _COLUMN_MAP = {
     "最低": "Low",
     "成交量": "Volume",
     "成交额": "Amount",
+}
+
+# 新浪日线用小写英文列名
+_SINA_COLUMN_MAP = {
+    "date": "Date",
+    "open": "Open",
+    "high": "High",
+    "low": "Low",
+    "close": "Close",
+    "volume": "Volume",
+    "amount": "Amount",
+    "outstanding_share": "OutstandingShare",
 }
 
 # 5 年，与上游 load_ohlcv 的默认回看窗口一致（指标要算 200 日均线）
@@ -49,8 +68,34 @@ def parse_symbol(symbol: str) -> tuple[str, str] | None:
     return None
 
 
+def _fetch_eastmoney(market: str, code: str, start: str, end: str) -> pd.DataFrame:
+    import akshare as ak
+
+    if market == "hk":
+        raw = ak.stock_hk_hist(symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq")
+    else:
+        raw = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq")
+    return raw.rename(columns=_EM_COLUMN_MAP) if raw is not None else pd.DataFrame()
+
+
+def _fetch_sina(market: str, code: str, start: str, end: str) -> pd.DataFrame:
+    """新浪财经。港股接口不支持日期区间，只能拉全量后自行截取。"""
+    import akshare as ak
+
+    if market == "hk":
+        raw = ak.stock_hk_daily(symbol=code, adjust="qfq")
+    else:
+        # 新浪用 sh/sz/bj 前缀；akshare 的港股接口不带前缀，A 股要自己按号段判断
+        prefix = "sh" if code.startswith(("6", "9")) else ("bj" if code.startswith(("4", "8")) else "sz")
+        raw = ak.stock_zh_a_daily(symbol=f"{prefix}{code}", start_date=start, end_date=end, adjust="qfq")
+    return raw.rename(columns=_SINA_COLUMN_MAP) if raw is not None else pd.DataFrame()
+
+
 def fetch_ohlcv(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """取日线 OHLCV，返回列 Date/Open/High/Low/Close/Volume，按日期升序。"""
+    """取日线 OHLCV，返回列 Date/Open/High/Low/Close/Volume，按日期升序。
+
+    先东方财富、再新浪：两家域名与限流策略都不同，同时挂掉的概率低得多。
+    """
     parsed = parse_symbol(symbol)
     if parsed is None:
         raise VendorUnavailableError(f"akshare 行情不支持该符号格式: {symbol!r}（仅 .SS/.SZ/.BJ/.HK）")
@@ -61,40 +106,40 @@ def fetch_ohlcv(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     if cached and time.time() - cached[0] < _MEM_TTL_SECONDS:
         return cached[1].copy()
 
-    import akshare as ak
-
     start = start_date.replace("-", "")
     end = end_date.replace("-", "")
 
-    try:
-        if market == "hk":
-            raw = ak.stock_hk_hist(
-                symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
-            )
-        else:
-            raw = ak.stock_zh_a_hist(
-                symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq"
-            )
-    except Exception as exc:  # 东财 push2 限流 / 网络 / 接口改版
-        raise VendorUnavailableError(f"akshare 行情抓取失败（{symbol}）: {exc}") from exc
+    errors: list[str] = []
+    data = pd.DataFrame()
+    for name, fetcher in (("东方财富", _fetch_eastmoney), ("新浪财经", _fetch_sina)):
+        try:
+            raw = fetcher(market, code, start, end)
+        except Exception as exc:  # 限流 / 网络 / 接口改版
+            errors.append(f"{name}: {exc}")
+            continue
+        if raw is None or raw.empty:
+            errors.append(f"{name}: 返回空数据")
+            continue
+        raw = raw.rename(columns=lambda c: _SINA_COLUMN_MAP.get(c, c))
+        keep = [c for c in ("Date", "Open", "High", "Low", "Close", "Volume", "OutstandingShare") if c in raw.columns]
+        missing = {"Date", "Open", "High", "Low", "Close"} - set(keep)
+        if missing:
+            errors.append(f"{name}: 缺少列 {missing}")
+            continue
+        candidate = raw[keep].copy()
+        candidate["Date"] = pd.to_datetime(candidate["Date"], errors="coerce")
+        for col in ("Open", "High", "Low", "Close", "Volume", "OutstandingShare"):
+            if col in candidate.columns:
+                candidate[col] = pd.to_numeric(candidate[col], errors="coerce")
+        candidate = candidate.dropna(subset=["Date", "Close"]).sort_values("Date").reset_index(drop=True)
+        if candidate.empty:
+            errors.append(f"{name}: 清洗后无有效行")
+            continue
+        data = candidate
+        break
 
-    if raw is None or raw.empty:
-        raise NoMarketDataError(
-            symbol, code, f"akshare 在 {start_date}~{end_date} 返回空数据"
-        )
-
-    data = raw.rename(columns=_COLUMN_MAP)
-    keep = [c for c in ("Date", "Open", "High", "Low", "Close", "Volume") if c in data.columns]
-    missing = {"Date", "Open", "High", "Low", "Close"} - set(keep)
-    if missing:
-        raise VendorUnavailableError(f"akshare 返回缺少列 {missing}，实际列: {list(data.columns)}")
-
-    data = data[keep].copy()
-    data["Date"] = pd.to_datetime(data["Date"], errors="coerce")
-    for col in ("Open", "High", "Low", "Close", "Volume"):
-        if col in data.columns:
-            data[col] = pd.to_numeric(data[col], errors="coerce")
-    data = data.dropna(subset=["Date", "Close"]).sort_values("Date").reset_index(drop=True)
+    if data.empty:
+        raise VendorUnavailableError(f"akshare 行情抓取失败（{symbol}）: " + "；".join(errors))
 
     _MEM[key] = (time.time(), data.copy())
     return data
