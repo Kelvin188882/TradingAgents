@@ -36,6 +36,10 @@ _UA = (
 _MEM_TTL_SECONDS = 600
 _MEM: dict[str, tuple[float, list[dict]]] = {}
 
+# 模型摘要可能省略新闻时分，这里独立保留实际送入模型的新闻中最晚发布时间。
+# 只记录真实源字段，不为日线或无时刻的数据补 00:00。
+_NEWS_LATEST_AT = None
+
 _PAGE_SIZE = 50
 _MAX_PAGES = 3
 
@@ -150,6 +154,20 @@ def _news_keyword(ticker: str) -> str | None:
     return parsed[1]
 
 
+def _record_news_time(articles: list[dict]) -> None:
+    global _NEWS_LATEST_AT
+    timestamps = [a["pub_date"] for a in articles if a.get("pub_date") is not None]
+    if timestamps:
+        latest = max(timestamps)
+        if _NEWS_LATEST_AT is None or latest > _NEWS_LATEST_AT:
+            _NEWS_LATEST_AT = latest
+
+
+def get_provenance() -> dict:
+    """供报告层读取的可序列化数据口径；没有分钟信息时返回空字典。"""
+    return {"news_latest_at": _NEWS_LATEST_AT.strftime("%Y-%m-%d %H:%M")} if _NEWS_LATEST_AT else {}
+
+
 def get_news(ticker: str, start_date: str, end_date: str) -> str:
     """`get_news` 的东财实现，输出格式与 yfinance vendor 对齐。
 
@@ -172,9 +190,11 @@ def get_news(ticker: str, start_date: str, end_date: str) -> str:
     in_range.sort(key=lambda a: a["pub_date"] or datetime.min, reverse=True)
 
     if in_range:
+        selected = in_range[:limit]
+        _record_news_time(selected)
         return (
             f"## {ticker} News, from {start_date} to {end_date}（数据源：东方财富）:\n\n"
-            f"{_format_articles(in_range[:limit])}"
+            f"{_format_articles(selected)}"
         )
 
     gap = coverage_gap(
@@ -239,7 +259,9 @@ def get_global_news(as_of_date: str, look_back_days: int | None = None, limit: i
             f"东财在 {start_date}~{as_of_date} 窗口内没有检索到宏观新闻"
         )
 
+    selected = collected[:limit]
+    _record_news_time(selected)
     return (
         f"## Global Market News, from {start_date} to {as_of_date}（数据源：东方财富）:\n\n"
-        f"{_format_articles(collected[:limit])}"
+        f"{_format_articles(selected)}"
     )

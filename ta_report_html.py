@@ -875,6 +875,18 @@ def _source_chain(raw: str, category: str) -> str:
     return " → ".join(labels.get(name, name) for name in names) if names else "未单独记录"
 
 
+def _runtime_provenance(settings: dict | None = None) -> dict:
+    """优先用随报告保存的源时间；正式运行时直接读新闻适配层记录。"""
+    saved = (settings or {}).get("_data_provenance") or {}
+    if saved:
+        return dict(saved)
+    try:
+        import ta_news_cn
+        return ta_news_cn.get_provenance()
+    except (ImportError, AttributeError):
+        return {}
+
+
 def _data_provenance(parts, settings: dict | None, ticker: str, trade_date: str) -> str:
     """展示报告能证明的数据日期；没有证据时留作未记录，不拿分析日期凑数。"""
     texts = {
@@ -884,6 +896,7 @@ def _data_provenance(parts, settings: dict | None, ticker: str, trade_date: str)
     }
     settings = settings or {}
     vendors = {**(settings.get("data_vendors") or {}), **(settings.get("tool_vendors") or {})}
+    metadata = _runtime_provenance(settings)
     rows = []
 
     market = texts.get("Market Analyst", "")
@@ -909,7 +922,8 @@ def _data_provenance(parts, settings: dict | None, ticker: str, trade_date: str)
         match = re.search(r"覆盖区间：\s*\d{4}-\d{2}-\d{2}\s*至\s*(\d{4}-\d{2}-\d{2})", news)
         if not match:
             match = re.search(r"基准日：(\d{4}-\d{2}-\d{2})", news)
-        cutoff = match.group(1) if match else "未单独记录"
+        # 源适配层记录的时分优先；旧报告没有该记录时才回退到正文日期。
+        cutoff = metadata.get("news_latest_at") or (match.group(1) if match else "未单独记录")
         raw = vendors.get("get_news") or vendors.get("news_data", "")
         kind = "已发布新闻" if "akshare_cn" in raw else "报告记录"
         rows.append(("新闻", f"来源链：{_source_chain(raw, 'news')}　·　发布截止：{cutoff}　·　{kind}"))
@@ -941,7 +955,7 @@ def _data_provenance(parts, settings: dict | None, ticker: str, trade_date: str)
     details = "".join(
         f'<div class="detail"><dt>{label}</dt><dd>{escape(value)}</dd></div>' for label, value in rows
     )
-    note = "日期提取自报告原文；未记录时不以分析日期代替。来源链表示回退顺序，不代表本次全部调用。"
+    note = "时间优先取数据适配层记录，缺失时提取报告原文；未记录时不以分析日期代替。来源链表示回退顺序，不代表本次全部调用。"
     if settings.get("_reconstructed"):
         note += " 当前为免重跑排版，来源链按当前配置重建，可能与原运行不同。"
     return (
@@ -1105,5 +1119,28 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
 
 
 def apply() -> None:
-    """把上游的 render_report 换成这一版。"""
+    """替换报告版式，并把真实源时间随报告目录保存，供免重跑重渲染使用。"""
     _upstream.render_report = render_report
+
+    from tradingagents import reporting as rp
+    if getattr(rp.write_report_tree, "_ta_provenance_capture", False):
+        return
+    original_write = rp.write_report_tree
+
+    def write_with_provenance(final_state, ticker, out_dir, *args, **kwargs):
+        result = original_write(final_state, ticker, out_dir, *args, **kwargs)
+        metadata = _runtime_provenance()
+        if metadata:
+            import json
+            from pathlib import Path
+            try:
+                (Path(out_dir) / "data_provenance.json").write_text(
+                    json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except OSError:
+                # 元数据落盘失败不影响已经生成的分析报告。
+                pass
+        return result
+
+    write_with_provenance._ta_provenance_capture = True
+    rp.write_report_tree = write_with_provenance

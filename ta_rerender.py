@@ -11,6 +11,7 @@
 """
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -122,6 +123,9 @@ def rerender(folder: Path) -> Path | None:
 
     settings = _settings_for(state)
     settings["_reconstructed"] = True
+    provenance_file = folder / "data_provenance.json"
+    if provenance_file.exists():
+        settings["_data_provenance"] = json.loads(provenance_file.read_text(encoding="utf-8"))
     out = rp.write_report_tree(state, _ticker_of(folder), folder, settings=settings, html=True)
     if original_md is not None:
         md_file.write_bytes(original_md)
