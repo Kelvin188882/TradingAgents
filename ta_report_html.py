@@ -520,11 +520,45 @@ tbody tr:last-child td { border-bottom: 0; }
 # 只处理 text token，不碰属性、不碰行内代码。
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
+# 展示层中文化：只翻译框架字段、角色和投资术语，不改原始 Markdown，
+# 也不硬译 RSI / MACD / PE 等技术缩写。多字术语先于单字术语匹配。
+_I18N = {
+    "FINAL TRANSACTION PROPOSAL": "最终交易建议",
+    "Overall Sentiment": "整体情绪", "Executive Summary": "核心摘要",
+    "Investment Thesis": "投资逻辑", "Strategic Actions": "策略行动",
+    "Position Sizing": "仓位建议", "Price Target": "目标价",
+    "Time Horizon": "时间窗口", "Entry Price": "参考入场价",
+    "Stop Loss": "止损价", "Recommendation": "综合建议",
+    "Rationale": "决策依据", "Reasoning": "决策依据",
+    "Confidence": "置信度", "Score": "评分", "Rating": "评级",
+    "Action": "操作", "Not provided": "未提供",
+    "Aggressive Analyst": "激进风险分析师",
+    "Conservative Analyst": "保守风险分析师", "Neutral Analyst": "中性风险分析师",
+    "Bull Analyst": "多头研究员", "Bear Analyst": "空头研究员",
+    "Mildly Bullish": "温和偏多", "Mildly Bearish": "温和偏空",
+    "Underweight": "减持", "Overweight": "增持",
+    "Bullish": "看多", "Bearish": "看空", "Neutral": "中性",
+    "Hold": "持有", "Buy": "买入", "Sell": "卖出",
+    "Bull": "多头", "Bear": "空头", "Low": "低", "High": "高",
+    "months": "个月", "month": "个月", "weeks": "周", "week": "周",
+    "days": "天", "day": "天", "years": "年", "year": "年",
+}
+_I18N_LOWER = {key.lower(): value for key, value in _I18N.items()}
+_I18N_RE = re.compile(
+    r"(?<![A-Za-z])(" + "|".join(re.escape(k) for k in sorted(_I18N, key=len, reverse=True)) + r")(?![A-Za-z])",
+    re.IGNORECASE,
+)
+
+
+def _localize_text(text: str) -> str:
+    return _I18N_RE.sub(lambda match: _I18N_LOWER[match.group(1).lower()], text)
+
 
 def _text_rule(self, tokens, idx, options, env):
     from markdown_it.common.utils import escapeHtml
 
-    return _DATE_RE.sub(r'<span class="nowrap">\1</span>', escapeHtml(tokens[idx].content))
+    content = _localize_text(tokens[idx].content)
+    return _DATE_RE.sub(r'<span class="nowrap">\1</span>', escapeHtml(content))
 
 
 def _cell_open(tag: str):
@@ -650,7 +684,7 @@ def _analysis_angles(md: MarkdownIt, parts) -> str:
         return ""
     return (
         '<section class="angles" aria-labelledby="angles-title">'
-        '<div class="angles-head"><h2 id="angles-title">分析角度汇总</h2>'
+        '<div class="angles-head"><h2 id="angles-title">综合汇总</h2>'
         f'<span>{len(cards)} 个独立视角</span></div>'
         f'<div class="angles-grid">{"".join(cards)}</div></section>'
     )
@@ -816,7 +850,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
         num = f"{int(numeral):02d}" if numeral.isdigit() else f"{n:02d}"
         body.append(
             f'<section id="s{n}"><h2><span class="numeral">{num}</span>'
-            f'<span>{escape(title)}</span><span class="en">{escape(name.strip())}</span></h2>'
+            f'<span>{escape(title)}</span></h2>'
         )
         for m, (agent, _filename, text) in enumerate(written, 1):
             label = _AGENT_ZH.get(agent, agent)
