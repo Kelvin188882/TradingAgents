@@ -248,7 +248,7 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 .verdict-lead .more { white-space: nowrap; font-size: 14px; }
 
 /* 分析角度汇总：首屏第二级信息，不与投资评级争夺主视觉。
-   两张一列在 36rem 行宽内仍有约 14 个中文/行，摘要限制为三行，详情保留完整上下文。 */
+   整卡点击、两行摘要，去掉额外表格线，让视线只停留在角度、评级和结论上。 */
 .angles { margin: var(--sp-8) 0 0; }
 .angles-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-4); }
 .angles-head h2 { margin: 0; font: 650 1.0625rem/1.5 var(--sans); }
@@ -257,7 +257,11 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 .angle {
   min-width: 0; display: flex; flex-direction: column; padding: var(--sp-4);
   border: 1px solid var(--hairline); border-radius: 10px; background: var(--surface);
+  color: inherit; text-decoration: none;
+  transition: border-color 0.15s, background-color 0.15s;
 }
+.angle:hover { border-color: var(--edge); background: var(--wash); }
+.angle:hover .angle-title { color: var(--accent); }
 .angle-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
 .angle-title { margin: 0; font: 650 15px/1.5 var(--sans); }
 .angle-rating {
@@ -267,17 +271,15 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 .angle-rating.up { color: var(--up); background: var(--up-soft); }
 .angle-rating.down { color: var(--down); background: var(--down-soft); }
 .angle-text {
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
-  overflow: hidden; margin: var(--sp-3) 0 var(--sp-4);
-  font-size: 13.5px; line-height: 1.75; color: var(--ink-2);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; min-height: 3.4em; margin: var(--sp-2) 0;
+  font-size: 13.5px; line-height: 1.7; color: var(--ink-2);
 }
 .angle-more {
-  display: flex; align-items: center; min-height: 44px; margin: auto calc(-1 * var(--sp-2)) calc(-1 * var(--sp-2));
-  padding: var(--sp-2); border-top: 1px solid var(--hairline);
-  font-size: 13px; line-height: 1.5; text-decoration: none;
+  display: flex; align-items: center; margin-top: auto;
+  font-size: 12.5px; line-height: 1.5; color: var(--accent);
 }
-.angle-more::after { content: "→"; margin-left: auto; }
-.angle-more:hover { text-decoration: underline; }
+.angle-more::after { content: "→"; margin-left: var(--sp-2); }
 
 /* 运行参数：辅助信息，默认收起 */
 .run { margin: var(--sp-6) 0 0; font-size: 13px; line-height: 1.7; }
@@ -501,7 +503,7 @@ tbody tr:last-child td { border-bottom: 0; }
   .toc, .toc-mobile, .to-top, .run { display: none; }
   .verdict, .angle { break-inside: avoid; box-shadow: none; }
   .angles-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .angle-more { min-height: 0; }
+  .angle-more { display: none; }
   main { max-width: none; }
   main h2 { break-before: page; margin-top: 0; border-top: 0; padding-top: 0; }
   main section:first-of-type h2 { break-before: auto; }
@@ -608,7 +610,7 @@ def _summary_text(md: MarkdownIt, text: str) -> str:
     if not sections:
         return ""
     chosen = next((content for visible, content in sections if visible), sections[0][1])
-    return _lead(chosen, 112)
+    return _lead(chosen, 88)
 
 
 def _angle_rating(text: str) -> str:
@@ -636,11 +638,11 @@ def _analysis_angles(md: MarkdownIt, parts) -> str:
             rating_zh = _RATING_ZH.get(rating, rating or "详见正文")
             excerpt = _summary_text(md, text) or "该角度已完成分析，请查看完整报告。"
             cards.append(
-                f'<article class="angle"><div class="angle-head">'
-                f'<h3 class="angle-title">{names[agent]}</h3>'
+                f'<a class="angle" href="#s{n}-{m}" aria-label="查看{names[agent]}完整分析">'
+                f'<div class="angle-head"><h3 class="angle-title">{names[agent]}</h3>'
                 f'<span class="angle-rating {tone}">{escape(rating_zh)}</span></div>'
                 f'<p class="angle-text">{escape(excerpt)}</p>'
-                f'<a class="angle-more" href="#s{n}-{m}" aria-label="查看{names[agent]}完整分析">查看详情</a></article>'
+                f'<span class="angle-more">查看详情</span></a>'
             )
     if not cards:
         return ""
