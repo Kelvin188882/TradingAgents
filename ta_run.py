@@ -221,6 +221,18 @@ def _apply_sentiment_vendor() -> None:
     sa._ta_sentiment_patched = True
 
 
+def _apply_report_theme() -> None:
+    """替换报告的 HTML 版式（中文排版 + A 股红涨绿跌 + 首屏决策卡）。
+
+    `tradingagents.reporting.write_report_tree` 是在函数内部
+    `from tradingagents.report_html import render_report`，取的是调用时的模块属性，
+    所以改 `report_html.render_report` 就能生效，不需要动上游文件。
+    """
+    import ta_report_html
+
+    ta_report_html.apply()
+
+
 def main() -> None:
     preset = os.environ.get("TA_NEWS_PRESET", "cnhk").strip().lower()
     if preset == "us":
@@ -242,6 +254,9 @@ def main() -> None:
 
     if os.environ.get("TA_SENTIMENT_VENDOR", "akshare").strip().lower() != "off":
         _apply_sentiment_vendor()
+
+    if os.environ.get("TA_REPORT_THEME", "cn").strip().lower() != "off":
+        _apply_report_theme()
 
     from cli.main import app
 
