@@ -34,17 +34,19 @@ _PROJECT = getattr(_upstream, "_PROJECT", f"{_ORG}/TradingAgents")
 
 # 五档评级的中文名：报告正文是中文，首屏不该让读者先翻译一个英文单词。
 _RATING_ZH = {
-    "Buy": "买入",
+    "Buy": "买入", "Bullish": "看多", "Mildly Bullish": "温和偏多",
     "Overweight": "增持",
-    "Hold": "持有",
+    "Hold": "持有", "Neutral": "中性",
     "Underweight": "减持",
-    "Sell": "卖出",
+    "Sell": "卖出", "Bearish": "看空", "Mildly Bearish": "温和偏空",
 }
 # 方向语义：买入/增持为多（A 股红），减持/卖空为空（A 股绿），持有中性。
 _TONE = {
     "Buy": "up", "Overweight": "up",
     "Hold": "level",
     "Underweight": "down", "Sell": "down",
+    "Bullish": "up", "Mildly Bullish": "up",
+    "Bearish": "down", "Mildly Bearish": "down", "Neutral": "level",
 }
 
 # 章节与角色的中文名。框架是英文的，但读的人在看中文报告。
@@ -245,6 +247,38 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 }
 .verdict-lead .more { white-space: nowrap; font-size: 14px; }
 
+/* 分析角度汇总：首屏第二级信息，不与投资评级争夺主视觉。
+   两张一列在 36rem 行宽内仍有约 14 个中文/行，摘要限制为三行，详情保留完整上下文。 */
+.angles { margin: var(--sp-8) 0 0; }
+.angles-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-4); }
+.angles-head h2 { margin: 0; font: 650 1.0625rem/1.5 var(--sans); }
+.angles-head span { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.angles-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sp-3); margin-top: var(--sp-4); }
+.angle {
+  min-width: 0; display: flex; flex-direction: column; padding: var(--sp-4);
+  border: 1px solid var(--hairline); border-radius: 10px; background: var(--surface);
+}
+.angle-head { display: flex; align-items: center; justify-content: space-between; gap: var(--sp-2); }
+.angle-title { margin: 0; font: 650 15px/1.5 var(--sans); }
+.angle-rating {
+  flex: none; padding: 2px 7px; border-radius: 4px;
+  font: 600 11.5px/1.5 var(--sans); color: var(--level); background: var(--wash);
+}
+.angle-rating.up { color: var(--up); background: var(--up-soft); }
+.angle-rating.down { color: var(--down); background: var(--down-soft); }
+.angle-text {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+  overflow: hidden; margin: var(--sp-3) 0 var(--sp-4);
+  font-size: 13.5px; line-height: 1.75; color: var(--ink-2);
+}
+.angle-more {
+  display: flex; align-items: center; min-height: 44px; margin: auto calc(-1 * var(--sp-2)) calc(-1 * var(--sp-2));
+  padding: var(--sp-2); border-top: 1px solid var(--hairline);
+  font-size: 13px; line-height: 1.5; text-decoration: none;
+}
+.angle-more::after { content: "→"; margin-left: auto; }
+.angle-more:hover { text-decoration: underline; }
+
 /* 运行参数：辅助信息，默认收起 */
 .run { margin: var(--sp-6) 0 0; font-size: 13px; line-height: 1.7; }
 .run > summary {
@@ -441,6 +475,7 @@ tbody tr:last-child td { border-bottom: 0; }
 
 @media (max-width: 40rem) {
   body { font-size: 16px; line-height: 1.8; }
+  .angles-grid { grid-template-columns: minmax(0, 1fr); }
   .page { padding: 0 var(--sp-4) var(--sp-12); }
   .hero h1 { font-size: 1.625rem; }
   .hero .sub { font-size: 13px; }
@@ -464,7 +499,9 @@ tbody tr:last-child td { border-bottom: 0; }
   .page { max-width: none; padding: 0; }
   .grid { display: block; }
   .toc, .toc-mobile, .to-top, .run { display: none; }
-  .verdict { break-inside: avoid; box-shadow: none; }
+  .verdict, .angle { break-inside: avoid; box-shadow: none; }
+  .angles-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .angle-more { min-height: 0; }
   main { max-width: none; }
   main h2 { break-before: page; margin-top: 0; border-top: 0; padding-top: 0; }
   main section:first-of-type h2 { break-before: auto; }
@@ -532,6 +569,87 @@ def _field(text: str, label: str) -> str:
     pattern = rf"^\s*\*\*{label}\*\*\s*[:\uff1a]\s*(.+)$"
     match = re.search(pattern, text or "", re.MULTILINE | re.IGNORECASE)
     return match.group(1).strip().strip("*").strip() if match else ""
+
+
+def _plain(text: str) -> str:
+    """把单行 Markdown 收成可安全放入摘要卡的纯文本。"""
+    text = re.sub(r"!?\[([^]]+)\]\([^)]+\)", r"\1", text or "")
+    text = re.sub(r"<[^>]+>", "", text)
+    return re.sub(r"[*_`~]", "", text).strip()
+
+
+def _summary_text(md: MarkdownIt, text: str) -> str:
+    """优先摘取结论段的正文；结论写成列表时退到首个列表项。
+
+    这是原文摘录，不调用模型二次总结，避免头部汇总与正文结论互相打架。
+    """
+    tokens = md.parse(text or "")
+    sections = []
+    active = False
+    level = 0
+    for i, token in enumerate(tokens):
+        if token.type == "heading_open":
+            active = i + 1 < len(tokens) and "结论" in tokens[i + 1].content
+            level = int(token.tag[1]) if active else 0
+        if active and token.type == "inline":
+            content = _plain(token.content)
+            if len(content) < 32 or re.match(r"(?i)(rating|final transaction)", content):
+                continue
+            visible = i > 0 and tokens[i - 1].type == "paragraph_open" and not tokens[i - 1].hidden
+            sections.append((visible, content))
+    if not sections:
+        for i, token in enumerate(tokens):
+            if token.type != "inline":
+                continue
+            content = _plain(token.content)
+            visible = i > 0 and tokens[i - 1].type == "paragraph_open" and not tokens[i - 1].hidden
+            if visible and len(content) >= 32 and not re.match(r"(?i)(rating|final transaction)", content):
+                sections.append((True, content))
+    if not sections:
+        return ""
+    chosen = next((content for visible, content in sections if visible), sections[0][1])
+    return _lead(chosen, 112)
+
+
+def _angle_rating(text: str) -> str:
+    for line in (text or "").splitlines():
+        match = re.match(r"(?i)(?:Overall Sentiment|Rating)\s*[:：]\s*(.+)", _plain(line))
+        if match:
+            return match.group(1).split("(", 1)[0].strip()
+    return ""
+
+
+def _analysis_angles(md: MarkdownIt, parts) -> str:
+    names = {
+        "Market Analyst": "行情与技术面",
+        "Fundamentals Analyst": "基本面与估值",
+        "News Analyst": "新闻与宏观",
+        "Sentiment Analyst": "市场与情绪",
+    }
+    cards = []
+    for n, (_heading, _folder, written) in enumerate(parts, 1):
+        for m, (agent, _filename, text) in enumerate(written, 1):
+            if agent not in names:
+                continue
+            rating = _angle_rating(text)
+            tone = _TONE.get(rating, "level")
+            rating_zh = _RATING_ZH.get(rating, rating or "详见正文")
+            excerpt = _summary_text(md, text) or "该角度已完成分析，请查看完整报告。"
+            cards.append(
+                f'<article class="angle"><div class="angle-head">'
+                f'<h3 class="angle-title">{names[agent]}</h3>'
+                f'<span class="angle-rating {tone}">{escape(rating_zh)}</span></div>'
+                f'<p class="angle-text">{escape(excerpt)}</p>'
+                f'<a class="angle-more" href="#s{n}-{m}" aria-label="查看{names[agent]}完整分析">查看详情</a></article>'
+            )
+    if not cards:
+        return ""
+    return (
+        '<section class="angles" aria-labelledby="angles-title">'
+        '<div class="angles-head"><h2 id="angles-title">分析角度汇总</h2>'
+        f'<span>{len(cards)} 个独立视角</span></div>'
+        f'<div class="angles-grid">{"".join(cards)}</div></section>'
+    )
 
 
 def _lead(text: str, limit: int = 120) -> str:
@@ -682,6 +800,8 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
         else ""
     )
 
+    angles_html = _analysis_angles(md, parts)
+
     details = "".join(
         f'<div class="{"note" if label == "记忆日志" else "detail"}">'
         f"<dt>{escape(label)}</dt><dd>{value}</dd></div>"
@@ -735,6 +855,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     <dl class="verdict-metrics">{metrics_html}</dl>
   </section>
   {lead_html}
+  {angles_html}
 
   <details class="run">
     <summary>运行参数</summary>
