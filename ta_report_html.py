@@ -1172,16 +1172,9 @@ _REPORT_JS = r"""
     status.textContent = text;
     status.classList.toggle("error", isError);
   }
-  function authRequired(response) {
-    if (response.status !== 401) return false;
-    const next = location.pathname + location.search + location.hash;
-    location.assign(`/login?next=${encodeURIComponent(next)}`);
-    return true;
-  }
   async function watch(jobId) {
     try {
       const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {cache: "no-store"});
-      if (authRequired(response)) return;
       const data = await response.json();
       if (!response.ok || !data.job) throw new Error(data.error || "无法读取分析状态");
       const job = data.job;
@@ -1218,7 +1211,6 @@ _REPORT_JS = r"""
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({ticker: input.value})
       });
-      if (authRequired(response)) return;
       const data = await response.json();
       if (!data.job) throw new Error(data.error || "提交失败");
       input.value = data.job.ticker;
