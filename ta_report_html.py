@@ -313,6 +313,8 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 .run dd { margin: 0; overflow-wrap: anywhere; }
 .run .note dd { color: var(--down); }
 .run .hint { color: var(--muted); font-style: italic; }
+.run + .run { margin-top: var(--sp-2); }
+.data-note { margin: var(--sp-3) 0 0; font-size: 12px; line-height: 1.65; color: var(--muted); }
 
 .field {
   display: inline-block; margin: 0 4px 4px 0; padding: 1px 6px;
@@ -861,6 +863,93 @@ def _run_details(final_state: dict, settings: dict | None) -> list[tuple[str, st
     return details
 
 
+def _source_chain(raw: str, category: str) -> str:
+    """把配置里的 vendor ID 转为可读来源链，并透出行情适配器内部的新浪兜底。"""
+    labels = {
+        "yfinance": "Yahoo", "akshare_cn": "东方财富", "sina": "新浪",
+        "fred": "FRED", "alpha_vantage": "Alpha Vantage",
+    }
+    names = [v.strip() for v in str(raw or "").split(",") if v.strip()]
+    if category == "market" and "akshare_cn" in names and "sina" not in names:
+        names.append("sina")
+    return " → ".join(labels.get(name, name) for name in names) if names else "未单独记录"
+
+
+def _data_provenance(parts, settings: dict | None, ticker: str, trade_date: str) -> str:
+    """展示报告能证明的数据日期；没有证据时留作未记录，不拿分析日期凑数。"""
+    texts = {
+        agent: text
+        for _heading, _folder, written in parts
+        for agent, _filename, text in written
+    }
+    settings = settings or {}
+    vendors = {**(settings.get("data_vendors") or {}), **(settings.get("tool_vendors") or {})}
+    rows = []
+
+    market = texts.get("Market Analyst", "")
+    if market:
+        match = re.search(r"技术分析报告（截至\s*(\d{4}-\d{2}-\d{2})", market)
+        if not match:
+            match = re.search(r"最新值（(\d{4}-\d{2}-\d{2})）", market)
+        cutoff = match.group(1) if match else "未单独记录"
+        rows.append(("行情", f"来源链：{_source_chain(vendors.get('core_stock_apis'), 'market')}　·　截止：{cutoff}　·　历史行情"))
+
+    fundamentals = texts.get("Fundamentals Analyst", "")
+    if fundamentals:
+        match = re.search(r"最新已披露报告期：([^｜\n*]+)", fundamentals)
+        period = _plain(match.group(1)) if match else "未单独记录"
+        raw = vendors.get("get_fundamentals") or vendors.get("fundamental_data", "")
+        kind = "报告记录"
+        if "akshare_cn" in raw:
+            kind = "已披露值；可见日保守估算" if ticker.upper().endswith(".HK") else "已披露实际值"
+        rows.append(("财报", f"来源链：{_source_chain(raw, 'fundamentals')}　·　报告期：{period}　·　{kind}"))
+
+    news = texts.get("News Analyst", "")
+    if news:
+        match = re.search(r"覆盖区间：\s*\d{4}-\d{2}-\d{2}\s*至\s*(\d{4}-\d{2}-\d{2})", news)
+        if not match:
+            match = re.search(r"基准日：(\d{4}-\d{2}-\d{2})", news)
+        cutoff = match.group(1) if match else "未单独记录"
+        raw = vendors.get("get_news") or vendors.get("news_data", "")
+        kind = "已发布新闻" if "akshare_cn" in raw else "报告记录"
+        rows.append(("新闻", f"来源链：{_source_chain(raw, 'news')}　·　发布截止：{cutoff}　·　{kind}"))
+
+        macro_lines = [
+            line for line in news.splitlines()
+            if re.search(r"\b(?:CPI|PPI|PMI|GDP|M1|M2|LPR)\b|失业率", line, re.IGNORECASE)
+        ]
+        macro_text = "\n".join(macro_lines)
+        # 宏观正文也会引用预测期；只有报告期不晚于分析日期的才列入已发布口径。
+        limit_month = trade_date[:7] if re.match(r"\d{4}-\d{2}-\d{2}", trade_date) else "9999-12"
+        months = sorted(m for m in set(re.findall(r"20\d{2}-\d{2}", macro_text)) if m <= limit_month)
+        quarters = sorted(
+            q for q in set(re.findall(r"20\d{2}Q[1-4]", macro_text))
+            if f"{q[:4]}-{int(q[-1]) * 3:02d}" <= limit_month
+        )
+        periods = []
+        if months:
+            periods.append(months[-1])
+        if quarters:
+            periods.append(quarters[-1])
+        period = " / ".join(periods) + "（按指标）" if periods else "未单独记录"
+        raw = vendors.get("macro_data", "")
+        kind = "官方已发布值" if "akshare_cn" in raw else "报告记录"
+        rows.append(("宏观", f"来源链：{_source_chain(raw, 'macro')}　·　最新引用期：{period}　·　{kind}"))
+
+    if not rows:
+        return ""
+    details = "".join(
+        f'<div class="detail"><dt>{label}</dt><dd>{escape(value)}</dd></div>' for label, value in rows
+    )
+    note = "日期提取自报告原文；未记录时不以分析日期代替。来源链表示回退顺序，不代表本次全部调用。"
+    if settings.get("_reconstructed"):
+        note += " 当前为免重跑排版，来源链按当前配置重建，可能与原运行不同。"
+    return (
+        '<details class="run data-sources"><summary>数据来源与时效</summary>'
+        f'<dl>{details}</dl><p class="data-note">{escape(note)}</p></details>'
+    )
+
+
 def _toc(parts) -> str:
     items = []
     for n, (heading, _folder, written) in enumerate(parts, 1):
@@ -922,6 +1011,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     points_html = _decision_points(parts, decision, rating, rating_zh) if decision else ""
 
     angles_html = _analysis_angles(md, parts)
+    provenance_html = _data_provenance(parts, settings, ticker, date)
 
     details = "".join(
         f'<div class="{"note" if label == "记忆日志" else "detail"}">'
@@ -979,6 +1069,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
   </section>
   {angles_html}
 
+  {provenance_html}
   <details class="run">
     <summary>运行参数</summary>
     <dl>{details}</dl>

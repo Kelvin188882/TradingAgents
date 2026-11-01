@@ -11,6 +11,7 @@
 """
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -133,6 +134,17 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="重渲 reports 下全部目录")
     args = parser.parse_args()
 
+    # 与正式运行一致地恢复本地数据源链，供「数据来源与时效」面板使用。
+    # 这些补丁只改进程内配置，不重跑分析，也不发起数据请求。
+    for env_name, apply in (
+        ("TA_MACRO_VENDOR", ta_run._apply_macro_vendor),
+        ("TA_MARKET_FALLBACK", ta_run._apply_market_fallback),
+        ("TA_NEWS_VENDOR", ta_run._apply_news_vendor),
+        ("TA_FUNDAMENTALS_VENDOR", ta_run._apply_fundamentals_vendor),
+    ):
+        default = "on" if env_name == "TA_MARKET_FALLBACK" else "akshare"
+        if os.environ.get(env_name, default).strip().lower() != "off":
+            apply()
     ta_run._apply_report_theme()
     _patch_mkdir()
 
