@@ -255,6 +255,31 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 }
 .export-links a:hover { border-color: var(--accent); color: var(--accent); }
 .export-links a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.history-reports { margin-top: var(--sp-4); border: 1px solid var(--hairline); border-radius: 9px; background: var(--surface); }
+.history-reports > summary {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3);
+  min-height: 44px; padding: 0 var(--sp-4); cursor: pointer; color: var(--ink-2);
+  font: 600 13px/1.5 var(--sans); list-style: none;
+}
+.history-reports > summary::-webkit-details-marker { display: none; }
+.history-reports > summary::after { content: "+"; order: 3; color: var(--muted); font-size: 18px; }
+.history-reports[open] > summary::after { content: "−"; }
+#history-count { margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 500; }
+.history-list { padding: 0 var(--sp-3) var(--sp-2); border-top: 1px solid var(--hairline); }
+.history-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-1); }
+.history-item + .history-item { border-top: 1px solid var(--hairline); }
+.history-info { min-width: 0; }
+.history-title { display: block; color: var(--ink); font: 600 14px/1.5 var(--sans); text-decoration: none; }
+.history-title:hover { color: var(--accent); }
+.history-meta { display: block; margin-top: 2px; color: var(--muted); font: 500 11.5px/1.5 var(--mono); }
+.history-downloads { display: flex; gap: var(--sp-2); }
+.history-downloads a {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 48px; min-height: 34px;
+  border: 1px solid var(--edge); border-radius: 6px; color: var(--ink-2);
+  font: 600 12px/1 var(--sans); text-decoration: none;
+}
+.history-downloads a:hover { border-color: var(--accent); color: var(--accent); }
+.history-message { margin: 0; padding: var(--sp-4) var(--sp-1); color: var(--muted); font-size: 13px; }
 
 /* 决策卡：整份报告唯一的「3 秒读懂」区域。
    最终结论 → 两行摘要 → 三项关键数据；不把同一决策拆成卡片外的第二段。 */
@@ -554,6 +579,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .export-actions { align-items: flex-start; }
   .export-links { flex: 1 1 100%; }
   .export-links a { flex: 1 1 9rem; }
+  .history-item { grid-template-columns: minmax(0, 1fr); gap: var(--sp-2); }
+  .history-downloads a { flex: 1; min-height: 38px; }
   .verdict { padding: var(--sp-4) var(--sp-4) var(--sp-4) var(--sp-6); }
   .run dl { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
   .run dd { margin-bottom: var(--sp-3); }
@@ -564,6 +591,8 @@ tbody tr:last-child td { border-bottom: 0; }
 }
 
 @media print {
+  @page { size: A4; margin: 14mm 12mm; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   :root {
     --paper: #fff; --surface: #fff; --wash: #f4f4f4;
     --ink: #000; --ink-2: #222; --muted: #444;
@@ -573,7 +602,7 @@ tbody tr:last-child td { border-bottom: 0; }
   body { font-size: 10.5pt; line-height: 1.7; }
   .page { max-width: none; padding: 0; }
   .grid { display: block; }
-  .toc, .toc-mobile, .to-top, .run, .ticker-search, .export-actions { display: none; }
+  .toc, .toc-mobile, .to-top, .run, .ticker-search, .export-actions, .history-reports { display: none; }
   .verdict, .angle { break-inside: avoid; box-shadow: none; }
   .angles-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .angle-more { display: none; }
@@ -1164,9 +1193,14 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     <span class="export-label">报告导出</span>
     <div class="export-links">
       <a href="download" download>下载当前报告 HTML</a>
+      <a href="download.pdf" download>下载当前报告 PDF</a>
       <a href="/api/export/all" download>导出全部历史 ZIP</a>
     </div>
   </nav>
+  <details class="history-reports" id="history-reports">
+    <summary><span>历史报告 · 可单独下载</span><span id="history-count">加载中…</span></summary>
+    <div class="history-list" id="history-list"><p class="history-message">正在读取历史报告…</p></div>
+  </details>
 
   <section class="verdict {tone}" aria-label="最终结论">
     <div class="verdict-head">
@@ -1221,6 +1255,8 @@ _REPORT_JS = r"""
   if (location.protocol === "file:") {
     const exports = document.getElementById("report-exports");
     if (exports) exports.hidden = true;
+    const history = document.getElementById("history-reports");
+    if (history) history.hidden = true;
   }
   const form = document.getElementById("ticker-search");
   if (!form) return;
@@ -1337,6 +1373,61 @@ _REPORT_JS = r"""
     status.textContent = text;
     status.classList.toggle("error", isError);
   }
+  function renderHistory(items) {
+    const list = document.getElementById("history-list");
+    document.getElementById("history-count").textContent = `${items.length} 份`;
+    list.replaceChildren();
+    if (!items.length) {
+      const empty = document.createElement("p");
+      empty.className = "history-message";
+      empty.textContent = "暂无历史报告";
+      list.append(empty);
+      return;
+    }
+    items.forEach(report => {
+      const row = document.createElement("div");
+      row.className = "history-item";
+      const info = document.createElement("div");
+      info.className = "history-info";
+      const title = document.createElement("a");
+      title.className = "history-title";
+      title.href = report.url;
+      title.textContent = report.name;
+      const meta = document.createElement("span");
+      meta.className = "history-meta";
+      meta.textContent = `${report.ticker} · ${report.analyzed_at}`;
+      info.append(title, meta);
+      const downloads = document.createElement("div");
+      downloads.className = "history-downloads";
+      [["HTML", report.html_url], ["PDF", report.pdf_url]].forEach(([label, url]) => {
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "";
+        link.textContent = label;
+        link.setAttribute("aria-label", `下载 ${report.name} ${label} 报告`);
+        downloads.append(link);
+      });
+      row.append(info, downloads);
+      list.append(row);
+    });
+  }
+
+  if (location.protocol !== "file:") {
+    fetch("/api/reports", {cache: "no-store"}).then(async response => {
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "历史报告读取失败");
+      renderHistory(data.reports || []);
+    }).catch(error => {
+      document.getElementById("history-count").textContent = "读取失败";
+      const list = document.getElementById("history-list");
+      list.replaceChildren();
+      const message = document.createElement("p");
+      message.className = "history-message";
+      message.textContent = error.message;
+      list.append(message);
+    });
+  }
+
   async function watch(jobId) {
     try {
       const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`, {cache: "no-store"});

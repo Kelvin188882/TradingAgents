@@ -194,7 +194,7 @@ def list_reports(ticker: str | None = None) -> list[Path]:
         if path.is_dir() and path.name.startswith(prefix)
         and (path / "complete_report.html").is_file()
     ]
-    return sorted(reports, key=lambda path: path.name, reverse=True)
+    return sorted(reports, key=lambda path: tuple(path.name.rsplit("_", 2)[-2:]), reverse=True)
 
 
 def report_url(report_dir: Path) -> str:
@@ -226,6 +226,80 @@ def _report_metadata(report: Path) -> dict:
     except (OSError, UnicodeError):
         name = ""
     return {"ticker": ticker, "name": name or ticker, "analyzed_at": analyzed_at}
+
+
+def _download_filename(report: Path, extension: str) -> str:
+    meta = _report_metadata(report)
+    date = report.name.rsplit("_", 2)[-2] if "_" in report.name else ""
+    filename = f"{meta['name']}_{meta['ticker']}_{date}_分析报告.{extension}"
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", filename)
+
+
+def report_download_metadata(report: Path) -> dict:
+    folder = quote(report.name)
+    return {
+        **_report_metadata(report),
+        "url": report_url(report),
+        "html_url": f"/reports/{folder}/download",
+        "pdf_url": f"/reports/{folder}/download.pdf",
+    }
+
+
+_PDF_LOCK = threading.Lock()
+
+
+def _chrome_binary() -> str:
+    candidates = [
+        os.environ.get("CHROME_BIN"),
+        shutil.which("google-chrome"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    raise RuntimeError("未找到 PDF 打印组件，请安装 Chrome 或 Chromium 后重试")
+
+
+def ensure_report_pdf(report: Path) -> Path:
+    """用报告自身的打印样式生成 PDF；HTML 更新后自动重新生成。"""
+    source = report / "complete_report.html"
+    target = report / "complete_report.pdf"
+    if target.is_file() and target.stat().st_mtime >= source.stat().st_mtime:
+        return target
+    with _PDF_LOCK:
+        if target.is_file() and target.stat().st_mtime >= source.stat().st_mtime:
+            return target
+        chrome = _chrome_binary()
+        try:
+            with tempfile.TemporaryDirectory(prefix="ta-report-pdf-") as temp_dir:
+                temp = Path(temp_dir)
+                output = temp / "report.pdf"
+                command = [
+                    chrome, "--headless=old", "--disable-gpu", "--no-sandbox",
+                    "--disable-dev-shm-usage", "--hide-scrollbars",
+                    "--run-all-compositor-stages-before-draw", "--virtual-time-budget=1500",
+                    "--no-pdf-header-footer", "--print-to-pdf-no-header",
+                    f"--user-data-dir={temp / 'profile'}", f"--print-to-pdf={output}", source.as_uri(),
+                ]
+                process = subprocess.run(
+                    command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, timeout=90, check=False,
+                )
+                if process.returncode != 0 or not output.is_file() or output.read_bytes()[:5] != b"%PDF-":
+                    raise RuntimeError("PDF 生成失败，请稍后重试")
+                staging = report / f".complete_report.{uuid.uuid4().hex}.pdf"
+                try:
+                    shutil.copyfile(output, staging)
+                    os.replace(staging, target)
+                finally:
+                    staging.unlink(missing_ok=True)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("PDF 生成超时，请稍后重试") from exc
+        except OSError as exc:
+            raise RuntimeError("PDF 保存失败，请检查磁盘空间后重试") from exc
+    return target
 
 
 def _archive_label(report: Path, metadata: dict) -> str:
@@ -277,7 +351,7 @@ def build_history_archive() -> tuple[tempfile.SpooledTemporaryFile, int, int]:
             bundle.writestr("index.html", catalog_html)
             bundle.writestr("报告目录.csv", catalog_csv)
             for report, _meta, label in entries:
-                for filename in ("complete_report.html", "complete_report.md", "data_provenance.json"):
+                for filename in ("complete_report.html", "complete_report.md", "complete_report.pdf", "data_provenance.json"):
                     source = report / filename
                     if source.is_file():
                         bundle.write(source, f"reports/{label}/{filename}")
@@ -405,9 +479,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
+        fallback = "report.pdf" if content_type == "application/pdf" else "report.html"
         self.send_header(
             "Content-Disposition",
-            f"attachment; filename=\"report.html\"; filename*=UTF-8''{quote(filename, safe='')}",
+            f"attachment; filename=\"{fallback}\"; filename*=UTF-8''{quote(filename, safe='')}",
         )
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -472,6 +547,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json({"ticker": ticker, "name": name})
             return
+        if path == "/api/reports":
+            self._json({"reports": [report_download_metadata(report) for report in list_reports()]})
+            return
         if path == "/api/active":
             self._json({"job": MANAGER.active()})
             return
@@ -495,15 +573,28 @@ class Handler(BaseHTTPRequestHandler):
         if match:
             report = _report_dir(unquote(match.group(1)))
             if report:
-                meta = _report_metadata(report)
-                filename = f"{meta['name']}_{meta['ticker']}_{report.name.rsplit('_', 2)[-2]}_分析报告.html"
-                filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", filename)
+                filename = _download_filename(report, "html")
                 try:
                     data = (report / "complete_report.html").read_bytes()
                 except OSError:
                     self._json({"error": "报告读取失败，请稍后重试"}, 500)
                     return
                 self._download(data, filename, "text/html; charset=utf-8")
+                return
+        match = re.fullmatch(r"/reports/([^/]+)/download\.pdf", path)
+        if match:
+            report = _report_dir(unquote(match.group(1)))
+            if report:
+                try:
+                    pdf = ensure_report_pdf(report)
+                    data = pdf.read_bytes()
+                except RuntimeError as exc:
+                    self._json({"error": str(exc)}, 503)
+                    return
+                except OSError:
+                    self._json({"error": "PDF 读取失败，请稍后重试"}, 500)
+                    return
+                self._download(data, _download_filename(report, "pdf"), "application/pdf")
                 return
         match = re.fullmatch(r"/reports/([^/]+)/complete_report\.html", path)
         if match:
