@@ -322,6 +322,26 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 
+/* 四视角多空倾向：一条色条读出多空分歧，无需翻到正文。 */
+.verdict-spectrum { margin: var(--sp-4) 0 0; }
+.spectrum-bar {
+  display: flex; height: 10px; border-radius: 5px; overflow: hidden;
+  background: var(--wash);
+}
+.spectrum-seg { flex: 1; min-width: 8px; }
+.spectrum-seg.up { background: var(--up); }
+.spectrum-seg.down { background: var(--down); }
+.spectrum-seg.level { background: var(--level); opacity: 0.65; }
+.spectrum-legend {
+  display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4);
+  margin: var(--sp-2) 0 0; padding: 0; list-style: none;
+}
+.spectrum-legend li { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+.spectrum-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.spectrum-dot.up { background: var(--up); }
+.spectrum-dot.down { background: var(--down); }
+.spectrum-dot.level { background: var(--level); opacity: 0.65; }
+
 .verdict-lead {
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
   overflow: hidden; margin: var(--sp-3) 0 0;
@@ -537,6 +557,37 @@ th {
 }
 td { border-bottom: 1px solid var(--hairline); }
 tbody tr:last-child td { border-bottom: 0; }
+tbody tr:nth-child(even) { background: var(--wash); }
+
+/* 数据图表：由报告里的表格自动生成，色条用中性蓝，不与涨跌语义色混淆。 */
+.chart {
+  margin: var(--sp-6) 0 var(--sp-8); padding: var(--sp-4);
+  border: 1px solid var(--hairline); border-radius: 10px; background: var(--surface);
+}
+.chart + .chart { margin-top: calc(-1 * var(--sp-4)); }
+.chart-title { margin: 0 0 var(--sp-3); font: 600 12px/1.5 var(--sans); letter-spacing: 0.04em; color: var(--muted); }
+.chart-panel { margin: 0 0 var(--sp-4); }
+.chart-panel:last-child { margin-bottom: 0; }
+.chart-metric { margin: 0 0 var(--sp-2); font: 600 13px/1.5 var(--sans); color: var(--ink-2); }
+.chart-rows { display: grid; gap: 7px; }
+.chart-row {
+  display: grid; grid-template-columns: minmax(4.5rem, max-content) minmax(0, 1fr) max-content;
+  align-items: center; gap: var(--sp-3);
+}
+.chart-label {
+  min-width: 0; font: 500 12.5px/1.4 var(--sans); color: var(--ink-2);
+  overflow-wrap: anywhere; white-space: nowrap;
+}
+.chart-track {
+  height: 14px; border-radius: 7px; overflow: hidden;
+  background: var(--wash);
+}
+.chart-bar {
+  display: block; height: 100%; border-radius: 7px; opacity: 0.9;
+  background: var(--accent); transition: width 0.3s ease;
+}
+.chart-val { font: 600 12px/1.3 var(--mono); color: var(--ink); white-space: nowrap; }
+.chart-note { margin: var(--sp-2) 0 0; font-size: 11.5px; line-height: 1.5; color: var(--muted); }
 
 .credit {
   margin-top: var(--sp-20); padding-top: var(--sp-4);
@@ -576,6 +627,9 @@ tbody tr:last-child td { border-bottom: 0; }
   .hero .sub { font-size: 13px; }
   .ticker-controls { grid-template-columns: minmax(0, 1fr); }
   .ticker-controls button { width: 100%; }
+  .chart-row { grid-template-columns: minmax(0, 1fr) max-content; }
+  .chart-track { grid-column: 1 / -1; grid-row: 2; }
+  .chart-val { text-align: right; }
   .export-actions { align-items: flex-start; }
   .export-links { flex: 1 1 100%; }
   .export-links a { flex: 1 1 9rem; }
@@ -604,6 +658,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .grid { display: block; }
   .toc, .toc-mobile, .to-top, .run, .ticker-search, .export-actions, .history-reports { display: none; }
   .verdict, .angle { break-inside: avoid; box-shadow: none; }
+  .chart { break-inside: avoid; }
+  .chart-bar { background: var(--accent); }
   .angles-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .angle-more { display: none; }
   main { max-width: none; }
@@ -702,6 +758,101 @@ def _render_agent_text(md: MarkdownIt, text: str) -> str:
     return md.renderer.render(tokens, md.options, {})
 
 
+def _render_agent_text(md: MarkdownIt, text: str) -> str:
+    """Agent 自带的标题下沉三级，不跟章节标题抢层级。"""
+    tokens = md.parse(text)
+    for token in tokens:
+        if token.type in ("heading_open", "heading_close"):
+            token.tag = f"h{min(int(token.tag[1]) + 3, 6)}"
+    return md.renderer.render(tokens, md.options, {})
+
+
+_NUM_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+
+
+def _cell_number(cell: str) -> float | None:
+    """从单元格里取第一个数值；纯文本、带单位或百分号都能解析。"""
+    plain = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", cell or "")
+    plain = plain.replace("*", "").replace("`", "").replace("~", "")
+    match = _NUM_RE.search(plain)
+    return float(match.group(0).replace(",", "")) if match else None
+
+
+def _cell_label(cell: str) -> str:
+    plain = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", cell or "")
+    return re.sub(r"[*_`~]", "", plain).strip()
+
+
+def _markdown_tables(text: str) -> list[list[list[str]]]:
+    """把 Markdown 表格切成 [表格][行][单元格]；不依赖分隔行以外的内容。"""
+    tables = []
+    current = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|"):
+            if current:
+                tables.append(current)
+                current = []
+            continue
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        if all(re.fullmatch(r":?-{2,}:?", c) for c in cells if c):
+            continue
+        current.append(cells)
+    if current:
+        tables.append(current)
+    return tables
+
+
+def _agent_charts(text: str, limit: int = 3) -> str:
+    """把报告中的趋势/指标表转成条形图；数据全取自原文，不新增推测值。"""
+    figures = []
+    for table in _markdown_tables(text):
+        if len(table) < 3:  # 表头 + 至少两条数据行，趋势才看得出走向。
+            continue
+        header, rows = table[0], table[1:]
+        if len(header) < 2 or len(rows) > 12:
+            continue
+        numeric_cols = []
+        for index in range(1, len(header)):
+            values = [_cell_number(row[index]) for row in rows if index < len(row)]
+            if len(values) >= 2 and all(v is not None for v in values):
+                numeric_cols.append(index)
+        if not numeric_cols:
+            continue
+        panels = []
+        for col_index in numeric_cols[:3]:
+            pairs = [(row[0], _cell_number(row[col_index]), _cell_label(row[col_index]))
+                     for row in rows if col_index < len(row) and _cell_number(row[col_index]) is not None]
+            values = [v for _label, v, _display in pairs]
+            if len(values) < 2 or max(values) == min(values):
+                continue
+            peak = max(abs(v) for v in values) or 1
+            bars = []
+            for label, value, display in pairs:
+                width = max(3, round(abs(value) / peak * 100, 1))
+                bars.append(
+                    '<div class="chart-row">'
+                    f'<span class="chart-label">{escape(_cell_label(label))}</span>'
+                    f'<span class="chart-track"><span class="chart-bar" style="width:{width}%"></span></span>'
+                    f'<span class="chart-val">{escape(display or f"{value:g}")}</span></div>'
+                )
+            panels.append(
+                f'<div class="chart-panel"><p class="chart-metric">{escape(_cell_label(header[col_index]))}</p>'
+                f'<div class="chart-rows">{"".join(bars)}</div></div>'
+            )
+        if not panels:
+            continue
+        figures.append(
+            '<figure class="chart" role="img" aria-label="数据图表">'
+            f'<figcaption class="chart-title">数据速览 · {escape(_cell_label(header[0]))}</figcaption>'
+            f'{"".join(panels)}'
+            '<p class="chart-note">由报告表格自动生成，数值取自原文。</p></figure>'
+        )
+        if len(figures) >= limit:
+            break
+    return "".join(figures)
+
+
 def _field(text: str, label: str) -> str:
     """从决策正文里取一个 `**Label**: value` 字段，容忍全角冒号与加粗。"""
     pattern = rf"^\s*\*\*{label}\*\*\s*[:\uff1a]\s*(.+)$"
@@ -755,6 +906,40 @@ def _angle_rating(text: str) -> str:
         if match:
             return match.group(1).split("(", 1)[0].strip()
     return ""
+
+
+_ANGLE_SHORT = {
+    "Market Analyst": "行情",
+    "Fundamentals Analyst": "基本面",
+    "News Analyst": "新闻宏观",
+    "Sentiment Analyst": "情绪",
+}
+
+
+def _sentiment_spectrum(parts) -> str:
+    """把四个分析视角的多空倾向压成一条色条，一眼读分歧。"""
+    views = []
+    for _heading, _folder, written in parts:
+        for agent, _filename, text in written:
+            short = _ANGLE_SHORT.get(agent)
+            if not short:
+                continue
+            rating = _angle_rating(text)
+            views.append((short, _RATING_ZH.get(rating, rating or "—"), _TONE.get(rating, "level")))
+    if len(views) < 2:
+        return ""
+    segments = "".join(
+        f'<span class="spectrum-seg {tone}" aria-hidden="true"></span>' for _n, _r, tone in views
+    )
+    legend = "".join(
+        f'<li><span class="spectrum-dot {tone}"></span>{escape(name)} · {escape(rating)}</li>'
+        for name, rating, tone in views
+    )
+    return (
+        '<div class="verdict-spectrum" aria-label="四视角多空倾向">'
+        f'<div class="spectrum-bar">{segments}</div>'
+        f'<ul class="spectrum-legend">{legend}</ul></div>'
+    )
 
 
 def _analysis_angles(md: MarkdownIt, parts) -> str:
@@ -1128,6 +1313,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     points_html = _decision_points(parts, decision, rating, rating_zh) if decision else ""
 
     angles_html = _analysis_angles(md, parts)
+    spectrum_html = _sentiment_spectrum(parts)
     provenance_html = _data_provenance(parts, settings, ticker, date)
 
     details = "".join(
@@ -1150,6 +1336,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
             role = _AGENT_ROLE.get(agent)
             chip = f'<span class="chip {role[1]}">{escape(role[0])}</span>' if role else ""
             body.append(f'<h3 id="s{n}-{m}">{chip}{escape(label)}</h3>\n{_render_agent_text(md, text)}')
+            body.append(_agent_charts(text))
         body.append("</section>")
 
     toc = _toc(parts)
@@ -1211,6 +1398,7 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     {lead_html}
     {points_html}
     <dl class="verdict-metrics">{metrics_html}</dl>
+    {spectrum_html}
   </section>
   {angles_html}
 
