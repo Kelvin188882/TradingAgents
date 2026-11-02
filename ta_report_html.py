@@ -241,6 +241,20 @@ main :is(h2, h3, h4) { scroll-margin-top: var(--sp-6); }
 .ticker-controls button:disabled { opacity: 0.58; cursor: wait; }
 .ticker-status { min-height: 1.5em; margin: var(--sp-2) 0 0; font-size: 12px; line-height: 1.5; color: var(--muted); }
 .ticker-status.error { color: var(--down); }
+.export-actions {
+  display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap;
+  gap: var(--sp-3); margin-top: var(--sp-4); padding-top: var(--sp-4); border-top: 1px solid var(--hairline);
+}
+.export-actions[hidden] { display: none; }
+.export-label { font: 600 12px/1.5 var(--sans); color: var(--muted); }
+.export-links { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.export-links a {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 38px;
+  padding: 0 var(--sp-3); border: 1px solid var(--edge); border-radius: 7px;
+  background: var(--surface); color: var(--ink-2); font: 600 13px/1 var(--sans); text-decoration: none;
+}
+.export-links a:hover { border-color: var(--accent); color: var(--accent); }
+.export-links a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* 决策卡：整份报告唯一的「3 秒读懂」区域。
    最终结论 → 两行摘要 → 三项关键数据；不把同一决策拆成卡片外的第二段。 */
@@ -537,6 +551,9 @@ tbody tr:last-child td { border-bottom: 0; }
   .hero .sub { font-size: 13px; }
   .ticker-controls { grid-template-columns: minmax(0, 1fr); }
   .ticker-controls button { width: 100%; }
+  .export-actions { align-items: flex-start; }
+  .export-links { flex: 1 1 100%; }
+  .export-links a { flex: 1 1 9rem; }
   .verdict { padding: var(--sp-4) var(--sp-4) var(--sp-4) var(--sp-6); }
   .run dl { grid-template-columns: minmax(0, 1fr); gap: var(--sp-1); }
   .run dd { margin-bottom: var(--sp-3); }
@@ -556,7 +573,7 @@ tbody tr:last-child td { border-bottom: 0; }
   body { font-size: 10.5pt; line-height: 1.7; }
   .page { max-width: none; padding: 0; }
   .grid { display: block; }
-  .toc, .toc-mobile, .to-top, .run, .ticker-search { display: none; }
+  .toc, .toc-mobile, .to-top, .run, .ticker-search, .export-actions { display: none; }
   .verdict, .angle { break-inside: avoid; box-shadow: none; }
   .angles-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .angle-more { display: none; }
@@ -1143,6 +1160,13 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
     <ul class="symbol-results" id="symbol-results" role="listbox" aria-label="股票搜索结果"></ul>
     <p class="ticker-status" id="ticker-status" aria-live="polite">支持 A 股及港股代码或名称搜索</p>
   </form>
+  <nav class="export-actions" id="report-exports" aria-label="报告导出">
+    <span class="export-label">报告导出</span>
+    <div class="export-links">
+      <a href="download" download>下载当前报告 HTML</a>
+      <a href="/api/export/all" download>导出全部历史 ZIP</a>
+    </div>
+  </nav>
 
   <section class="verdict {tone}" aria-label="最终结论">
     <div class="verdict-head">
@@ -1194,6 +1218,10 @@ def render_report(ticker: str, final_state: dict, settings: dict | None, parts) 
 
 _REPORT_JS = r"""
 (() => {
+  if (location.protocol === "file:") {
+    const exports = document.getElementById("report-exports");
+    if (exports) exports.hidden = true;
+  }
   const form = document.getElementById("ticker-search");
   if (!form) return;
   const input = document.getElementById("ticker-input");

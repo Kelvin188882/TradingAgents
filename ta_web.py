@@ -6,14 +6,20 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import html
+import io
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -195,6 +201,94 @@ def report_url(report_dir: Path) -> str:
     return f"/reports/{quote(report_dir.name)}/complete_report.html"
 
 
+def _report_dir(folder: str) -> Path | None:
+    """仅允许现有报告目录名，阻止下载路径逃逸。"""
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", folder) or folder in {".", ".."}:
+        return None
+    report = REPORTS_DIR / folder
+    if not (report / "complete_report.html").is_file():
+        return None
+    resolved = report.resolve()
+    return resolved if resolved.is_relative_to(REPORTS_DIR) else None
+
+
+def _report_metadata(report: Path) -> dict:
+    match = re.fullmatch(r"([A-Za-z0-9.]+)_(\d{8}_\d{6})", report.name)
+    ticker, stamp = match.groups() if match else (report.name, "")
+    try:
+        analyzed_at = datetime.strptime(stamp, "%Y%m%d_%H%M%S").strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        analyzed_at = stamp
+    try:
+        source = (report / "complete_report.html").read_text(encoding="utf-8")
+        found = re.search(r'<span class="stock-name">(.*?)</span>', source, re.DOTALL)
+        name = html.unescape(re.sub(r"<[^>]+>", "", found.group(1))).strip() if found else ""
+    except (OSError, UnicodeError):
+        name = ""
+    return {"ticker": ticker, "name": name or ticker, "analyzed_at": analyzed_at}
+
+
+def _archive_label(report: Path, metadata: dict) -> str:
+    label = f"{metadata['name']}_{report.name}"
+    return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", label)
+
+
+def _history_index(reports: list[Path]) -> tuple[bytes, bytes, list[tuple[Path, dict, str]]]:
+    """生成 ZIP 内的离线 HTML 目录和 Excel 可读的 UTF-8 CSV 目录。"""
+    entries = [(path, _report_metadata(path)) for path in reports]
+    entries = [(path, meta, _archive_label(path, meta)) for path, meta in entries]
+    rows = []
+    cards = []
+    for index, (_path, meta, label) in enumerate(entries, 1):
+        relative = f"reports/{quote(label)}/complete_report.html"
+        rows.append([index, meta["name"], meta["ticker"], meta["analyzed_at"], relative])
+        cards.append(
+            "<tr>"
+            f"<td>{index}</td><td>{html.escape(meta['name'])}</td>"
+            f"<td>{html.escape(meta['ticker'])}</td><td>{html.escape(meta['analyzed_at'])}</td>"
+            f"<td><a href=\"{relative}\">打开 HTML 报告</a></td></tr>"
+        )
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["序号", "股票名称", "个股代码", "分析时间", "报告文件"])
+    writer.writerows(rows)
+    catalog_csv = ("\ufeff" + output.getvalue()).encode("utf-8")
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    catalog_html = f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TradingAgents 历史报告目录</title><style>
+body{{max-width:1100px;margin:0 auto;padding:40px 24px;font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#252525;background:#f7f7f5}}
+h1{{margin:0;font-size:28px}}p{{color:#666}}table{{width:100%;border-collapse:collapse;background:#fff}}th,td{{padding:12px;border-bottom:1px solid #e5e5e0;text-align:left}}a{{color:#175cd3}}@media(max-width:650px){{th:nth-child(1),td:nth-child(1){{display:none}}th,td{{padding:9px 6px;font-size:12px}}}}
+</style></head><body><h1>历史分析报告</h1><p>共 {len(entries)} 份 · 导出于 {generated_at} · 报告可完全离线打开</p>
+<table><thead><tr><th>序号</th><th>股票名称</th><th>个股代码</th><th>分析时间</th><th>报告</th></tr></thead>
+<tbody>{''.join(cards)}</tbody></table></body></html>"""
+    return catalog_html.encode("utf-8"), catalog_csv, entries
+
+
+def build_history_archive() -> tuple[tempfile.SpooledTemporaryFile, int, int]:
+    """在临时文件中打包，避免历史报告增多后占用大量内存。"""
+    reports = list_reports()
+    if not reports:
+        raise ValueError("暂无可导出的历史报告")
+    catalog_html, catalog_csv, entries = _history_index(reports)
+    archive = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
+    try:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("index.html", catalog_html)
+            bundle.writestr("报告目录.csv", catalog_csv)
+            for report, _meta, label in entries:
+                for filename in ("complete_report.html", "complete_report.md", "data_provenance.json"):
+                    source = report / filename
+                    if source.is_file():
+                        bundle.write(source, f"reports/{label}/{filename}")
+        size = archive.seek(0, os.SEEK_END)
+        archive.seek(0)
+        return archive, size, len(entries)
+    except Exception:
+        archive.close()
+        raise
+
+
 def run_analysis(ticker: str, job_id: str) -> Path:
     """同步执行一次分析；只返回本次新生成的报告，避免误开旧文件。"""
     started = time.time()
@@ -307,6 +401,45 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _download(self, data: bytes, filename: str, content_type: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header(
+            "Content-Disposition",
+            f"attachment; filename=\"report.html\"; filename*=UTF-8''{quote(filename, safe='')}",
+        )
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _export_history(self) -> None:
+        try:
+            archive, size, count = build_history_archive()
+        except ValueError as exc:
+            self._json({"error": str(exc)}, 404)
+            return
+        except OSError:
+            self._json({"error": "历史报告打包失败，请稍后重试"}, 500)
+            return
+        filename = f"TradingAgents_全部历史报告_{datetime.now():%Y%m%d_%H%M%S}.zip"
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Length", str(size))
+            self.send_header("X-Report-Count", str(count))
+            self.send_header(
+                "Content-Disposition",
+                f"attachment; filename=\"reports.zip\"; filename*=UTF-8''{quote(filename, safe='')}",
+            )
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            shutil.copyfileobj(archive, self.wfile)
+        finally:
+            archive.close()
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
         path = urlparse(self.path).path
         if path == "/healthz":
@@ -342,6 +475,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/active":
             self._json({"job": MANAGER.active()})
             return
+        if path == "/api/export/all":
+            self._export_history()
+            return
         if path.startswith("/api/jobs/"):
             job = MANAGER.get(path.rsplit("/", 1)[-1])
             self._json({"job": job} if job else {"error": "任务不存在"}, 200 if job else 404)
@@ -355,6 +491,20 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json({"message": "暂无报告，请先通过命令行生成一份报告"}, 404)
             return
+        match = re.fullmatch(r"/reports/([^/]+)/download", path)
+        if match:
+            report = _report_dir(unquote(match.group(1)))
+            if report:
+                meta = _report_metadata(report)
+                filename = f"{meta['name']}_{meta['ticker']}_{report.name.rsplit('_', 2)[-2]}_分析报告.html"
+                filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", filename)
+                try:
+                    data = (report / "complete_report.html").read_bytes()
+                except OSError:
+                    self._json({"error": "报告读取失败，请稍后重试"}, 500)
+                    return
+                self._download(data, filename, "text/html; charset=utf-8")
+                return
         match = re.fullmatch(r"/reports/([^/]+)/complete_report\.html", path)
         if match:
             folder = unquote(match.group(1))
